@@ -1,0 +1,109 @@
+# -------------------------------------------------------------------
+# MINI PC 1 (pmx-01) - Control Planes 1 y 2, Workers: Data y Apps
+# -------------------------------------------------------------------
+resource "proxmox_virtual_environment_vm" "talos_pmx01" {
+  for_each = local.vms_pmx01
+
+  provider  = proxmox.pmx01
+  node_name = each.value.node
+  vm_id     = each.value.vm_id
+  name      = "${each.key}"
+  tags      = each.value.tags
+
+  cpu {
+    cores = each.value.cores
+    type  = "host"
+  }
+
+  memory {
+    dedicated = each.value.memory
+  }
+
+  agent {
+    enabled = true
+  }
+
+  network_device {
+    bridge = "vmbr0"
+  }
+
+  # Disco destino: El disco duro de la VM (se crea vacío, la API de Proxmox lo maneja sin SSH)
+  disk {
+    datastore_id = "local-lvm"
+    interface    = "scsi0"
+    size         = each.value.disk_size
+    file_format  = "raw"
+  }
+
+  # La lectora de CD-ROM que monta la ISO de Talos (La API lo maneja de forma nativa)
+  cdrom {
+    file_id   = "local:iso/talos-nocloud-amd64-with-qemu.iso"
+    interface = "ide3"
+  }
+
+  boot_order = ["scsi0", "ide3"]
+
+  # Inyecta el nombre de la VM (cp-01, worker-apps-01, etc.) en el metadato de la Placa Virtual
+  # Con esto podemos configurar los archivos controlplane.yaml y worker.yaml, para que al momento de configurar el clúster de
+  # kubernetes, y hacer un 'kubectl get nodes', en vez de obtener nombres tipo 'talos-xxx-xxx', obtengamos el nombre de las
+  # VMs que configuramos aquí.
+#   smbios {
+#     product   = each.key
+#     # Talos lee el "serial" buscando argumentos de red instalados por hardware
+#     # Formato: talos.network.interface.eth0.address=IP/CIDR talos.network.interface.eth0.gateway=GW
+#     serial    = "talos.network.interface.eth0.address=${each.value.ip}${local.network_cidr} talos.network.interface.eth0.gateway=${local.network_gateway}"
+#   }
+}
+
+
+# -------------------------------------------------------------------
+# MINI PC 2 (pmx-02) - Control Plane 3, Workers: Heavy y Ops
+# -------------------------------------------------------------------
+resource "proxmox_virtual_environment_vm" "talos_pmx02" {
+  for_each = local.vms_pmx02
+
+  provider  = proxmox.pmx02
+  node_name = each.value.node
+  vm_id     = each.value.vm_id
+  name      = "${each.key}"
+  tags      = each.value.tags
+
+  cpu {
+    cores = each.value.cores
+    type  = "host"
+  }
+
+  memory {
+    dedicated = each.value.memory
+  }
+
+  agent {
+    enabled = true
+  }
+
+  network_device {
+    bridge = "vmbr0"
+  }
+
+  # Disco destino: El disco duro de la VM (se crea vacío, la API de Proxmox lo maneja sin SSH)
+  disk {
+    datastore_id = "local-lvm"
+    interface    = "scsi0"
+    size         = each.value.disk_size
+    file_format  = "raw"
+  }
+
+  # La lectora de CD-ROM que monta la ISO de Talos (La API lo maneja de forma nativa)
+  cdrom {
+    file_id   = "local:iso/talos-nocloud-amd64-with-qemu.iso"
+    interface = "ide3"
+  }
+
+  boot_order = ["scsi0", "ide3"]
+
+  # Inyecta el nombre de la VM (cp-02, worker-heavy-02, etc.) en el metadato de la Placa Virtual
+#   smbios {
+#     product   = each.key
+#     serial    = "talos.network.interface.eth0.address=${each.value.ip}${local.network_cidr} talos.network.interface.eth0.gateway=${local.network_gateway}"
+#   }
+}

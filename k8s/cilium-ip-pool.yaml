@@ -1,0 +1,11 @@
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: homelab-ip-pool
+  namespace: kube-system
+spec:
+  blocks:
+    # Se deben usar IPs que estén fuera del rango del servidor DHCP del router
+    # pero en la misma subred /24 que las VMs de Talos
+    - start: "192.168.0.70"
+      stop: "192.168.0.149"

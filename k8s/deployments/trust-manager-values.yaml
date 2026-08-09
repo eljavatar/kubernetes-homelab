@@ -1,0 +1,29 @@
+# Default values: https://artifacthub.io/packages/helm/cert-manager/trust-manager/0.24.0?modal=values
+
+replicaCount: 1
+
+# Ajustes del contenedor para cumplir con los estándares restringidos de Talos
+app:
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+nodeSelector:
+  kubernetes.io/hostname: "worker-ops-02"
+
+# Configuración para autorizar la replicación de secretos
+secretTargets:
+  enabled: false # Cambiar a true únicamente si se va a distribuir llaves en formato Secret TLS en vez de ConfigMaps
+
+# Asignación al nodo de operaciones (Ops)
+nodeSelector:
+  #node-role.kubernetes.io/ops: "true"
+  kubernetes.io/hostname: "worker-ops-02"

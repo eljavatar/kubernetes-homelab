@@ -1,0 +1,102 @@
+# https://unixorn.github.io/post/homelab/k8s/01-talos-with-cilium-cni-on-proxmox/
+# https://www.digitalocean.com/community/tutorials/kubernetes-gateway-api-tutorial-cilium-ingress-alternative#step-1-deploy-a-sample-app
+# https://gist.github.com/stevenyepes/4149acfed3a8ff84127b59f85eb6f979
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: playground
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playground-nginx-service
+  namespace: playground
+spec:
+  selector:
+    app: playground-nginx-pod
+  ports:
+    - name: http
+      port: 80 # This is what the service is listening on, and what will be routed to
+      targetPort: 8080 # Port the pods are listening on, don't route directly here!
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playground-nginx-app
+  namespace: playground
+spec:
+  selector:
+    matchLabels:
+      app: playground-nginx-pod  # <-- must match pod labels exactly
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: playground-nginx-pod
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "worker-apps-01"
+      # Talos is very security oriented, so we have to set up the
+      # security context explicitly
+      # ---------- Pod‑level security settings ----------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101 # non‑root UID that the image can run as
+        seccompProfile:
+          type: RuntimeDefault
+        # Uncomment if you need a shared FS group for volume writes
+        # fsGroup: 101
+      # ---------- Containers ----------
+      containers:
+        - name: nginx-playground-container
+          image: nginxinc/nginx-unprivileged:latest # Alpine, but we force a non‑root UID
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          # talos requires us to specify our resources instead of
+          # letting k8s YOLO them
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: playground-nginx-httproute
+  namespace: playground # Namespace de desarrollo
+spec:
+  parentRefs:
+    - name: external-gateway
+      namespace: gateway-api-system # Namespace donde está el Gateway
+      #sectionName: https-local # Se amarra específicamente al listener HTTPS
+  hostnames:
+    - "api.eljavatar.home"
+    # Si queremos que también esté accesible desde internet:
+    # Eventualmente, podríamos tener 2 HTTPRoute, uno para tráfico local y otro para tráfico público
+    # Esto sería útil por ejemplo si queremos tener un servicio (como Grafana), que solo sea accesible
+    # localmente, pero que podamos activarle el ingreso de tráfico público aplicando un manifiesto
+    - "api.eljavatar.org"
+  rules:
+    - matches:
+      - path:
+          type: PathPrefix
+          value: /
+      backendRefs:
+        - name: playground-nginx-service # Service de Kubernetes normal (ClusterIP)
+          port: 80 # El puerto en texto plano del contenedor/servicio
+    # # También podemos añadir filtros (ej. redirigir HTTP a HTTPS si vinieran por el puerto 80)
+    # - filters:
+    #     - type: RequestRedirect
+    #       requestRedirect:
+    #         scheme: https
+    #         statusCode: 301 # Redirección permanente segura

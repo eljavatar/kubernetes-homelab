@@ -1,0 +1,63 @@
+# Default values: https://artifacthub.io/packages/helm/descheduler/descheduler/0.36.0?modal=values
+# https://github.com/kubernetes-sigs/descheduler
+
+kind: Deployment
+
+nodeSelector:
+  kubernetes.io/hostname: "worker-ops-02"
+
+# Required when running as a Deployment
+deschedulingInterval: "5m" # Evalúa el balanceo del clúster cada 5 minutos
+
+# Configuración de las políticas de rebalanceo
+cmdOptions:
+  v: 2 # Nivel de log estándar para auditoría en el repositorio
+
+# Nueva estructura de perfiles unificada en v0.36
+deschedulerPolicy:
+  profiles:
+    - name: homelab-balance-profile
+      # 1. Configuración de los plugins que vamos a activar
+      pluginConfig:
+        # Configuración avanzada de las reglas de desalojo (Eviction Rules)
+        - name: DefaultEvictor
+          args:
+            # Control estricto de qué Pods SÍ y qué Pods NO se pueden tocar
+            podProtections:
+              # Deshabilitamos protecciones nativas que queremos permitir bajo nuestro control
+              # Setting a value in defaultDisabled disables the corresponding default protection rule.
+              # This means the specified type of Pods will no longer be protected from eviction and may
+              # be evicted if they meet other criteria.
+              defaultDisabled:
+                # El Descheduler, de forma nativa, YA protege a los pods con almacenamiento local
+                # (PodsWithLocalStorage), a los DaemonSetPods (como Cilium), y a los pods críticos
+                # del sistema (SystemCriticalPods)
+                # Por tanto, solo agregamos SystemCriticalPods, ya que queremos que el Descheduler pueda mover a CoreDNS
+                - SystemCriticalPods
+              # Habilitamos protecciones explícitas para blindar la infraestructura
+              # Setting a value in extraEnabled enables an additional protection rule. This means the
+              # specified type of Pods will be protected from eviction.
+              # Lo dejamos vacío para NO activar PodsWithPVC. 
+              # Así permitimos que las apps normales con discos OpenEBS se puedan rebalancear si violan afinidades.
+              extraEnabled: []
+        - name: RemoveDuplicates
+        - name: RemovePodsViolatingInterPodAntiAffinity
+      
+      # 2. Activación de los plugins específicos que necesitamos ejecutar
+      plugins:
+        balance:
+          enabled:
+            # ESTRATEGIA A: Evita que se concentren múltiples réplicas del mismo deployment en un solo nodo
+            - RemoveDuplicates
+        deschedule:
+          enabled:
+            # ESTRATEGIA B: Desaloja Pods que violan las reglas sugeridas (preferred) de anti-afinidad
+            - RemovePodsViolatingInterPodAntiAffinity
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

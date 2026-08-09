@@ -1,0 +1,223 @@
+# Default values: https://artifacthub.io/packages/helm/cilium/cilium/1.18.0?modal=values
+
+# Gracias a que Talos configura kubePrism, se levanta un proxy local en cada nodo para comunicarse
+# con la API de kubernetes a través del puerto 7445. Esto nos evita tener que colocar la IP del
+# clúster y su puerto, que en nuestro caso es la VIP 192.168.0.39 y 6443 respectivamente.
+k8sServiceHost: localhost
+k8sServicePort: 7445
+
+# Con esto, Cilium automáticamente activa y asume el control de todas las funciones de balanceo de carga
+# de Kubernetes (incluyendo ClusterIP, NodePort, LoadBalancer y ExternalIPs).
+kubeProxyReplacement: true
+
+operator:
+  enabled: true
+  rollOutPods: true
+  replicas: 1
+  prometheus:
+    enabled: true # Salen por el puerto 9963
+    serviceMonitor:
+      enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+
+identityAllocationMode: crd
+enableK8sEndpointSlice: true
+# 'localRedirectPolicies' podría ser necesario a futuro si el clúster crece a cientos de nodos y
+# se evidencia que CoreDNS se satura, ya que ahí será el momento de instalar NodeLocal DNSCache
+# y por ende, activar este flag.
+# localRedirectPolicies: # Antiguamente localRedirectPolicy
+#   enabled: true
+#l7Proxy: true
+
+#endpointRoutes:
+#  enabled: true
+#routingMode: native
+#ipv4NativeRoutingCIDR: "10.244.0.0/16"
+# Deshabilitar túneles (VXLAN/Geneve) para que Proxmox vea las IPs reales
+#tunnelProtocol: "" 
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+#autoDirectNodeRoutes: false
+#devices: [ens+, eth+]
+
+k8sClientRateLimit:
+  qps: 50
+  burst: 100
+
+#healthChecking: true
+
+cni:
+  install: true
+  # Para indicar que las VMs de Talos esperen a que la red esté 100% operativa antes de permitir que Kubelet
+  # intente arrancar pods del sistema (útil para reinicios)
+  exclusive: true
+
+ipam:
+  mode: kubernetes
+k8s:
+  requireIPv4PodCIDR: true
+  requireIPv6PodCIDR: false
+
+enableIPv4Masquerade: true
+enableIPv6Masquerade: true
+
+bpf:
+  masquerade: true
+ipv4:
+  enabled: true
+ipv6:
+  # Activar IPv6 en la forma como estamos configurando el clúster añade una capa de complejidad muy alta en
+  # la configuración inicial de las VMs de Talos con Terraform, a cambio de un beneficio práctico casi nulo,
+  # ya que el Cloudflare Tunnel y Cilium Gateway ya resuelven la conectividad externa de forma transparente
+  # sobre IPv4, sin importar si un usuario en internet intenta entrar a *.eljavatar.org usando una red IPv6
+  # pura, ya que Cloudflare recibe la petición en su red global sobre IPv6, procesa el tráfico y se lo envía
+  # a nuestro pod de cloudflared dentro del clúster a través del túnel. Para nuestro clúster de Kubernetes,
+  # todo el tráfico entrante seguirá luciendo como conexiones IPv4 tradicionales.
+  # Por esta razón dejamos deshabilitado ipv6
+  enabled: false
+l2announcements:
+  enabled: true # Esto reemplazaría el uso de MetalLB
+  # Si un nodo de Proxmox que aloja un Worker activo se cae, el clúster tardará como máximo 8 segundos
+  # en liberar la IP del servicio, garantizando una alta disponibilidad rápida para los pods.
+  leaseDuration: 8s
+  # El nodo líder refrescará su estado cada 5 segundos; le da un margen de 3 segundos antes de que
+  # expire la duración total, protegiéndose de micro-cortes de red entre las VMs.
+  leaseRenewDeadline: 5s
+  # Si la API de Kubernetes está ocupda procesando la carga de los pods y falla un intento de renovación,
+  # Cilium reintentará cada 1 segundo, permitiendo hasta 3 reintentos dentro del periodo de renovación.
+  leaseRetryPeriod: 1s
+ingressController:
+  enabled: false
+envoy:
+  enabled: true
+  prometheus:
+    enabled: true # Sale por el puerto 9964
+    serviceMonitor:
+      enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+gatewayAPI:
+  enabled: true
+  # Activa el Application-Layer Protocol Negotiation en los listeners TKS/HTTPS del Gateway de Cilium
+  enableAlpn: true
+  # Permite que el Gateway de Cilium utilice el campo 'appProtocol' de los Services de Kubernetes para
+  # saber qué protocolo hablar con los pods
+  enableAppProtocol: true
+
+# Sería últil si el router es compatible con BGP. Si el router no es compatible, es mejor dejarlo desactivado
+# bgpControlPlane:
+#   enabled: true
+
+hubble:
+  enabled: true
+  # # Forzar la creación correcta de certificados TLS mutuos mediante Helm
+  # tls:
+  #   auto:
+  #     method: helm
+  # # Solución al timeout de DNS: Forzar el dominio correcto para resolver los peers
+  # peerService:
+  #   clusterDomain: cluster.local
+  relay:
+    # Relay actúa como un agregador central uniendo los datos del clúster, ya que se conecta a todos los
+    # agentes de Hubble en cada Nodo (cada VM) y consolida los flujos de red en una sola API centralizada.
+    # Por otro lado, es obligatorio para la interfaz gráfica.
+    enabled: true
+    replicas: 1
+    # Forzar a Hubble Relay a correr en el nodo de Ops
+    nodeSelector:
+      kubernetes.io/hostname: "worker-ops-02"
+    prometheus:
+      enabled: true # Sale por el puerto 9966
+      serviceMonitor:
+        enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+  ui:
+    enabled: true
+    replicas: 1
+    # Forzar a Hubble UI (la interfaz gráfica) a correr en el nodo de Ops
+    nodeSelector:
+      kubernetes.io/hostname: "worker-ops-02"
+  metrics:
+    enableOpenMetrics: true # Habilita el estándar en puerto 9965. Requerido para httpV2 y exemplars
+    # https://docs.cilium.io/en/v1.18/observability/metrics/#hubble-metrics
+    enabled:
+      # dns (Por defecto): Registra absolutamente todos los flujos DNS, incluyendo consultas (queries)
+      # y respuestas (responses), tanto para registros IPv4 (A) como IPv6 (AAAA).
+      # Con 'query' indicamos que solo mida las peticiones DNS salients, y con 'ignoreAAAA' ignoramos
+      # por completo las consultas IPv6. De esta forma reducimos las métricas a más de la mitad, lo que
+      # a su vez reduce muchísimo el espacio en Prometheus.
+      - dns:query;ignoreAAAA
+      # drop (Por defecto): Registra cada paquete descartado (dropped) desglosado de forma muy genérica
+      # o, por el contrario, con IPs crudas si no se configura el contexto, perdiendo visibilidad sobre
+      # qué Pod causó el desastre.
+      # Con 'sourceContext' y 'destinationContext' añadimos la Identidad de Seguridad de Cilium (identity)
+      # para ver exactamente qué aplicación o Workload está sufriendo bloqueos de red.
+      - drop:sourceContext=identity;destinationContext=identity
+      # Expone métricas del estado de conexiones TCP a nivel de sistema operativo.
+      - tcp
+      # flow (Por defecto): Mide el volumen general de flujos de red por segundo sin agruparlos de forma
+      # inteligente.
+      # Con 'sourceContext' y 'destinationContext fuerza a Hubble a agrupar los contadores usando el
+      # nombre del recurso (un Deployment, un Stateful o un DaemonSet) y las identidades reservadas
+      # de Cilium (como kube-apiserver, ingress, host, world). Esto permite saber exactamente cuántos
+      # paquetes por segundo, por ejemplo desde un fronted-deployment hacia un backend-deployment, con
+      # una cardinalidad superbaja y controlada.
+      - flow:sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity
+      # Registra el volumen de paquetes ICMP (los famosos "pings", mensajes de error de red
+      # o de "destino inalcanzable").
+      - icmp 
+      # Habilita exemplars y métricas L7 para trazas.
+      # Con 'exemplars=true' permitimos enlazar métricas de Prometheus directamente con trazas distribuidas
+      # (como las de Tempo o Jaeger). Por otro lado con estas 'labelsContext', en lugar de IPs o nombres de
+      # Pods exactos, usamos contextos basados en abstracciones de Kubernetes como namespace (apps, stage,
+      # production, o los que definamos), workload (api-gateway-deployment, frontend-deployment, payments-service
+      # o los que definamos para nuestros Deployment y StatefulSet) y traffic_direction ('ingress' si el tráfico
+      # entra al Pod destino, o 'egress' si sale del Pod orígen).
+      - httpV2:exemplars=true;labelsContext=source_namespace,source_workload,destination_namespace,destination_workload,traffic_direction
+    serviceMonitor:
+      enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+
+prometheus:
+  enabled: true # Salen por el puerto 9962
+  serviceMonitor:
+    enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+    #trustCRDsExist: true # Permite la instalación sin los CRDs de prometheus presentes aún
+
+securityContext:
+  privileged: true
+  capabilities:
+    ciliumAgent:
+      - CHOWN
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - IPC_LOCK
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cleanCiliumState:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# Para configuraciones Multi-clúster
+# clustermesh:
+#   useAPIServer: true
+#   apiserver:
+#     service:
+#       type: LoadBalancer # Obligatorio para que los clústeres externos se conecten
+
+# Agent resources
+resources:
+  limits:
+    cpu: 2
+    memory: 2Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+

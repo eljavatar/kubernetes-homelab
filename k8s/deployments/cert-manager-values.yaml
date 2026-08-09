@@ -1,0 +1,42 @@
+# Default values: https://artifacthub.io/packages/helm/cert-manager/cert-manager/1.21.0?modal=values
+
+# Habilitar la instalación automática de CRDs requeridos
+crds:
+  enabled: true
+  keep: true
+
+# Configuración global de recursos y réplicas para producción
+replicaCount: 1
+
+# Activación del soporte nativo para Gateway API v1.4.1
+extraArgs:
+  - --enable-gateway-api
+
+nodeSelector:
+  kubernetes.io/hostname: "worker-ops-02"
+
+# Ajustes de seguridad compatibles con Talos OS y Cilium
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: false
+
+webhook:
+  nodeSelector:
+    kubernetes.io/hostname: "worker-ops-02"
+
+cainjector:
+  nodeSelector:
+    kubernetes.io/hostname: "worker-ops-02"

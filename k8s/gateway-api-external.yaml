@@ -1,0 +1,83 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external-gateway
+  namespace: gateway-api-system # Namespace de infraestructura
+  annotations:
+    # Aquí le especificamos a Cilium qué IP exacta del pool asignarle a este Gateway
+    io.cilium/lb-ipam-ips: "192.168.0.70"
+spec:
+  # Le indicamos que use la infraestructura de Cilium para levantar el proxy
+  gatewayClassName: cilium
+  listeners:
+    # --- LISTENER HTTP: Los usaremos para redirigir el tráfico hacia https ---
+    - name: http
+      port: 80
+      protocol: HTTP
+      # Permite que rutas de CUALQUIER namespace se enganchen aquí
+      # Por defecto, en la Gateway API, un HTTPRoute solo puede vincularse a un Gateway si ambos están
+      # en el mismo namespace.
+      # Al configurar from: All, rompemos esa barrera de aislamiento. Significa que el Gateway (que está
+      # protegido en el namespace de infraestructura gateway-api-system) permitirá que desarrolladores o
+      # aplicaciones que vivan en cualquier otro namespace (como my-apps, monitoring o database) creen
+      # sus propios objetos HTTPRoute y los "enganchen" a este Gateway público.
+      allowedRoutes:
+        namespaces:
+          from: All
+    # Los requests tipo gRPC usan también los listeners que usan el protocolo HTTPS
+    # --- LISTENER 1: TRÁFICO LOCAL PRIVADO ---
+    - name: https-local
+      port: 443
+      protocol: HTTPS
+      hostname: "*.eljavatar.home"
+      # Levantamos el Certificado con un manifiesto propio, así que no necesitamos inyectar
+      # el ClusterIssuer a través de esta anotación
+      # Indicamos a cert-manager qué emisor usar específicamente para este dominio local
+      # metadata:
+      #   annotations:
+      #     # Como internal-ca-issuer es un ClusterIssuer de alcance global, se puede leer la CA
+      #     # desde el namespace cert-manager y colocará el certificado final emitido directamente
+      #     # en este namespace (gateway-api-system) con el nombre que especifiquemos aquí para
+      #     # dicho certificado (que en este caso será gateway-local-tls)
+      #     cert-manager.io/cluster-issuer: "internal-ca-issuer"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            # Vinculado al emisor local (internal-ca-issuer)
+            # cert-manager creará/rotará este Secret automáticamente en este mismo namespace
+            name: cert-gateway-local-secret 
+    # --- LISTENER 2: TRÁFICO PÚBLICO (CLOUDFLARE) ---
+    - name: https-publico
+      protocol: HTTPS
+      port: 443
+      hostname: "*.eljavatar.org"
+      # Levantamos el Certificado con un manifiesto propio, así que no necesitamos inyectar
+      # el ClusterIssuer a través de esta anotación
+      # Indicamos a cert-manager que use Let's Encrypt / Cloudflare para el dominio público
+      # metadata:
+      #   annotations:
+      #     cert-manager.io/cluster-issuer: "letsencrypt-production"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            # Vinculado al emisor de Cloudflare (letsencrypt-stage-issuer)
+            # cert-manager creará/rotará este Secret automáticamente aquí
+            name: cert-letsencrypt-public-secret
+    
+    # # --- LISTENER 3: TRÁFICO TCP PARA POSTGRES ---
+    # # Si exponemos Postgres por aquí, la IP 192.168.0.70:5432 apuntará estrictamente a una única base de datos
+    # # NO lo usaremos porque no nos da mucha flexibilidad en caso de tener múltiples bases de datos Postgres
+    # - name: postgres-in
+    #   port: 5432
+    #   protocol: TCP
+    #   allowedRoutes:
+    #     namespaces:
+    #       from: All

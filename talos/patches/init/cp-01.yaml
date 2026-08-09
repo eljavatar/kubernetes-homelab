@@ -1,0 +1,67 @@
+machine:
+  nodeLabels:
+    topology.kubernetes.io/zone: "pmx-01"
+    custom-role: cp
+  network:
+    #hostname: cp-01
+    interfaces:
+      - interface: eth0
+        # Si no quisiéramos usar interface: eth0, podríamos usar un selector por mac address
+        # pero esto implica tener que crear las VMs con esta misma dirección mac
+        # deviceSelector:
+        #   hardwareAddr: "52:54:00:12:34:56"
+        dhcp: false
+        addresses:
+          - 192.168.0.31/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 192.168.0.1
+        vip:
+          ip: "192.168.0.30" # <--- Elegimos una IP LIBRE de la subred para el clúster HA
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+  kubelet:
+    extraArgs:
+      rotate-server-certificates: "true" # Permite que el nodo pida renovar sus certificados automáticamente
+    extraConfig:
+      serverTLSBootstrap: true
+    clusterDNS:
+      - 10.96.0.10
+  features:
+    # Deshabilitamos el Servidor de caché DNS de Talos, ya que queremos que se usen los nameservers
+    # 1.1.1.1 y 8.8.8.8
+    hostDNS:
+      enabled: false
+      forwardKubeDNSToHost: false
+cluster:
+  # Esta configuración es para deshabilitar Flannel (ya que vamos a instalar Cilium posteriormente)
+  network:
+    cni:
+      name: none
+  proxy:
+    disabled: true
+  coreDNS:
+    disabled: true
+  apiServer:
+    admissionControl:
+      - name: PodSecurity
+        configuration:
+          apiVersion: pod-security.admission.config.k8s.io/v1
+          kind: PodSecurityConfiguration
+          defaults:
+            audit: privileged
+            audit-version: latest
+            enforce: privileged
+            enforce-version: latest
+            warn: privileged
+            warn-version: latest
+          exemptions:
+            namespaces: []
+            runtimeClasses: []
+            usernames: []
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: cp-01
+auto: off

@@ -1,0 +1,59 @@
+machine:
+  nodeLabels:
+    topology.kubernetes.io/zone: "pmx-01"
+    custom-role: cp
+  network:
+    interfaces:
+      - interface: eth0
+        dhcp: false
+        addresses:
+          - 192.168.0.32/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 192.168.0.1
+        vip:
+          ip: "192.168.0.30"
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+  kubelet:
+    extraArgs:
+      rotate-server-certificates: "true"
+    extraConfig:
+      serverTLSBootstrap: true
+    clusterDNS:
+      - 10.96.0.10
+  features:
+    hostDNS:
+      enabled: false
+      forwardKubeDNSToHost: false
+cluster:
+  network:
+    cni:
+      name: none
+  proxy:
+    disabled: true
+  coreDNS:
+    disabled: true
+  apiServer:
+    admissionControl:
+      - name: PodSecurity
+        configuration:
+          apiVersion: pod-security.admission.config.k8s.io/v1
+          kind: PodSecurityConfiguration
+          defaults:
+            audit: privileged
+            audit-version: latest
+            enforce: privileged
+            enforce-version: latest
+            warn: privileged
+            warn-version: latest
+          exemptions:
+            namespaces: []
+            runtimeClasses: []
+            usernames: []
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: cp-02
+auto: off

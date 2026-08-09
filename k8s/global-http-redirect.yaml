@@ -1,0 +1,15 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: global-http-to-https-redirect
+  namespace: gateway-api-system # Lo dejamos en el namespace de infraestructura
+spec:
+  parentRefs:
+    - name: external-gateway
+      sectionName: http # Se engancha EXACTAMENTE al nombre del listener del puerto 80
+  rules:
+    - filters:
+      - type: RequestRedirect
+        requestRedirect:
+          scheme: https # Fuerza a cambiar http:// por https://
+          statusCode: 301 # Redirección permanente

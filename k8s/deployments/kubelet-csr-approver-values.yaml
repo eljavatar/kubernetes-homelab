@@ -1,0 +1,31 @@
+# Defaul values: https://artifacthub.io/packages/helm/kubelet-csr-approver/kubelet-csr-approver/1.2.14?modal=values
+
+# Expresión regular que debe coincidir con los nombres de nodo (FQDN): cp-01, worker-some-01,
+# worker-another-02, etc.
+providerRegex: "^(cp|worker)-.*$"
+
+# El segmento de red completo /24 donde habitan las instancias Talos (192.168.0.30 - .59)
+providerIpPrefixes: "192.168.0.0/24"
+
+# CRUCIAL PARA TALOS: Evita que el approver intente hacer un lookup DNS inverso que fallará
+# Esto debido a que Talos no expone resoluciones DNS internas estándar para sus nodos virtuales
+# de la misma manera que lo hace un proveedor cloud tradicional.
+bypassDnsResolution: true
+
+# Tiempos de expiración tolerados para los certificados (ej: 3600 segundos = 1 hora)
+# Por defecto son 367 días, que es el tiempo que Kubernetes suele pedir por defecto para certificados
+# para el rol de servidor. Así que para evitar bloqueos innecesarios dejaremos este mismo tiempo
+#maxExpirationSeconds: "31708800s" # ó "8808h"
+
+replicas: 1
+nodeSelector:
+  kubernetes.io/hostname: "worker-ops-02"
+
+# Configuración de recursos para producción
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi

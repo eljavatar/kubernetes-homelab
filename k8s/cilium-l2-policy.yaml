@@ -1,0 +1,44 @@
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: homelab-l2-announcement
+  namespace: kube-system
+spec:
+  # Selecciona todos los servicios LoadBalancer; cambiarlo si se quiere filtrar por etiquetas
+  serviceSelector: {}
+  # Así se vería si quisiéramos que filtre solo los servicios con alguna etiqueta:
+  # serviceSelector:
+  #   matchLabels:
+  #     myCustomTag: "some-value"
+
+  # Selecciona todos los nodos trabajadores
+  # En un clúster multi-nodo, es posible que no queramos que los nodos del Control plane realicen
+  # anuncios ARP, por tanto los excluímos:
+  nodeSelector:
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: DoesNotExist
+    # Si quisieramos filtrar por tipos de Nodos en particular
+    # - key: custom-role
+    #   operator: In
+    #   values:
+    #     - "apps"
+    #     - "ops"
+
+  # Permite anunciar tanto IPs asignadas mediante LoadBalancerIPPool como ExternalIPs
+  loadBalancerIPs: true
+  externalIPs: true
+
+  # Interfaces de red físicas de las VMs en Proxmox (ej. eth0, ens18)
+  # Diferentes hardware mostrarán diferentes nombres de dispositivos de red.
+  # Esta lista de expresiones regulares (en formato Golang) encontrará todos
+  # los esquemas de nombres más comunes para dispositivos de red para que
+  # Cilium pueda encontrar una interfaz de red para hacer anuncios arp.
+  interfaces:
+    - ^eth+
+    - ^eno+
+    - ^enp+
+    - ^ens+
+    - ^wlan+
+    - ^vmbr+
+    - ^wlp+

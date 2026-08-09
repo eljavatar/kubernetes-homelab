@@ -1,0 +1,88 @@
+# Default values: https://artifacthub.io/packages/helm/metrics-server/metrics-server/3.13.1?modal=values
+
+# 1. Escalamiento y Alta Disponibilidad
+replicas: 2
+
+# 2. Argumentos críticos del contenedor para negociar con Talos Linux
+args:
+  # OBLIGATORIO EN TALOS: Los Kubelets de Talos usan certificados TLS autofirmados por su CA interna.
+  # Sin esta bandera, metrics-server rechazará la conexión con el nodo por "Certificate Unknown".
+  # NOTA: En nuestro caso si estamos generando certificados de confianza, por lo que no requerimos
+  # usar esta bandera
+  #- --kubelet-insecure-tls
+  # Configura la prioridad de resolución de direcciones de los nodos en Talos
+  # Talos Linux configura interfaces de red muy estrictas. Al forzar --kubelet-preferred-address-types=InternalIP,
+  # garantizamos que metrics-server le pida los datos al Kubelet utilizando las IPs privadas de las Mini PCs (las
+  # que asignamos mediante Terraform), evitando que intente resolver nombres de host a través de DNS antes de que
+  # la red interna esté lista.
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+
+# Deshabilitamos nodeSelector clásico para usar reglas avanzadas de afinidad
+nodeSelector: {}
+
+# 3. Distribución inteligente en las Mini PCs (Aislamiento de Cargas Pesadas)
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: custom-role
+              operator: In
+              values:
+                # Evitamos que consuma recursos en worker-heavy-02 o worker-data-01
+                - "ops"   # Nodo de observabilidad/seaweedfs
+                - "apps"  # Nodo de aplicaciones (Java, Go, Keycloak)
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - metrics-server
+          topologyKey: "kubernetes.io/hostname"
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0   # garantiza que Kubernetes no pueda matar un pod viejo si no hay uno nuevo listo
+    maxSurge: 1         # Permite crear un pod temporal extra en el nodo alterno antes de la limpieza
+
+# 4. Escudo de protección contra interrupciones (PodDisruptionBudget)
+# Como habilitamos el Descheduler, este escudo impide que mate ambas réplicas a la vez.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# 5. Seguridad y Recursos (Alineado con las directivas baseline/restricted de K8s v1.36)
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+  limits:
+    cpu: 200m
+    memory: 400Mi
+
+# Sondas de salud adaptadas a los tiempos de arranque del API de agregación
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 10
+readinessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true

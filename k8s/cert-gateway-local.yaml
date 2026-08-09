@@ -1,0 +1,24 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cert-gateway-local
+  namespace: gateway-api-system # Mismo namespace donde vivirá el Gateway
+spec:
+  # Nombre del Secreto de Kubernetes donde cert-manager guardará el certificado final
+  # Este Secret es el que leerá el listener local del Gateway
+  secretName: cert-gateway-local-secret
+  commonName: "eljavatar.home"
+  duration: 2160h # 90 días de validez
+  renewBefore: 360h # Se renueva automáticamente 15 días antes de vencer
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  dnsNames:
+    - "eljavatar.home" # Recomendado añadir el dominio raíz para cobertura total
+    - "*.eljavatar.home" # Cubre grafana.eljavatar.home, auth.eljavatar.home, etc.
+  issuerRef:
+    name: internal-ca-issuer # Apunta al ClusterIssuer que usa la CA interna
+    kind: ClusterIssuer
+    group: cert-manager.io

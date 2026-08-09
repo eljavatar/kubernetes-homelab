@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: cloudflare-tunnel-system
+spec:
+  replicas: 2 # Mantenemos alta disponibilidad; un pod en cada una de las mini PCs
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      # # Asegura que Talos le asigne tiempo suficiente para cerrar conexiones antes de matarlo
+      # terminationGracePeriodSeconds: 30
+      nodeSelector: {} # Eliminado para usar affinity
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: custom-role
+                    operator: In
+                    values:
+                      - ops
+                      - apps
+        podAntiAffinity: # Se usa antiafinidad para separar los pods
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - cloudflared
+              topologyKey: "topology.kubernetes.io/zone"
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          args:
+            - "tunnel"
+            - "--no-autoupdate"
+            # - "--protocol"
+            # - "http2" # Fuerza HTTP/2 sobre TCP plano para máxima compatibilidad con Cilium
+            - "run"
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-tunnel-token-secret
+                  key: TUNNEL_TOKEN
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532 # UID estándar sin privilegios de la imagen de Cloudflare
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "128Mi"

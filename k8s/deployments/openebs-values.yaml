@@ -1,0 +1,66 @@
+# Default values: https://artifacthub.io/packages/helm/openebs/openebs/4.5.1?modal=values
+
+localpv-provisioner:
+  # https://github.com/openebs/dynamic-localpv-provisioner/blob/v4.2.0/deploy/helm/charts/values.yaml
+  localpv:
+    replicas: 2
+    # Apuntamos estrictamente dentro de /var debido a la inmutabilidad de Talos Linux
+    basePath: "/var/openebs/local"
+    nodeSelector: {} # Eliminado para usar affinity
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: custom-role
+                  operator: In
+                  values:
+                    - ops
+                    - apps
+                    - data
+      podAntiAffinity: # Se usa antiafinidad para separar los pods
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                    - cloudflared
+            topologyKey: "topology.kubernetes.io/zone"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  
+  hostpathClass:
+    enabled: true
+    name: openebs-hostpath
+    isDefaultClass: true # La marca automáticamente como default
+    reclaimPolicy: Delete # Available reclaim policies: Delete/Retain, defaults: Delete.
+
+engines:
+  local:
+    # Habilitamos el motor Hostpath (y Device) para aprovisionamiento dinámico en carpetas locales (Local PV)
+    hostpath:
+      enabled: true
+    # Deshabilitamos motores locales que requieren herramientas de SO ausentes en Talos
+    lvm:
+      enabled: false
+    zfs:
+      enabled: false
+  replicated:
+    # Deshabilitamos por completo Mayastor para evitar consumo de HugePages y CPU pollers
+    mayastor:
+      enabled: false
+
+# Deshabilitar stack de observabilidad interna (Loki/Alloy/Minio)
+loki:
+  enabled: false
+  minio:
+    enabled: false
+
+alloy:
+  enabled: false

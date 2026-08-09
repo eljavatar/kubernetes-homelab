@@ -1,0 +1,29 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {} # Indica que se genera sola, sin internet
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-ca-cert
+  namespace: cert-manager
+spec:
+  isCA: true # Es una entidad certificadora
+  commonName: cluster-internal-ca
+  secretName: internal-ca-secret
+  privateKey:
+    algorithm: Ed25519
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+spec:
+  ca:
+    secretName: internal-ca-secret # Usa la CA que acabamos de crear

@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cert-letsencrypt-public
+  namespace: gateway-api-system # Mismo namespace donde vivirá el Gateway
+spec:
+  # Nombre del Secreto de Kubernetes donde cert-manager guardará el certificado final
+  # Este Secret es el que leerá el listener público del Gateway
+  secretName: cert-letsencrypt-public-secret # Nombre que referenciaremos en el Gateway API
+  commonName: "eljavatar.org"
+  duration: 2160h # 90 días (estándar de Let's Encrypt)
+  renewBefore: 720h # Se renueva automáticamente 30 días antes de vencer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "eljavatar.org" # Recomendado añadir el dominio raíz para cobertura total
+    - "*.eljavatar.org" # Cubre auth.eljavatar.org, api.eljavatar.org, etc.
+  issuerRef:
+    name: letsencrypt-stage-issuer # Apunta al ClusterIssuer de Cloudflare
+    kind: ClusterIssuer
+    group: cert-manager.io

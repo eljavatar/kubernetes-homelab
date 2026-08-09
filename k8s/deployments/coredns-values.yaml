@@ -1,0 +1,156 @@
+# Default values: https://artifacthub.io/packages/helm/coredns/coredns/1.46.0?modal=values
+# https://github.com/siderolabs/talos/discussions/10012
+# https://github.com/sergelogvinov/terraform-talos/blob/main/_deployments/vars/coredns-local.yaml
+
+image:
+  repository: registry.k8s.io/coredns/coredns
+  tag: "v1.14.2"
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+
+# Requerido al usar Descheduler ya que usamos regla de afinidad preferredDuringSchedulingIgnoredDuringExecution
+# Estrategia de actualización progresiva segura
+rollingUpdate:
+  maxUnavailable: 0   # GARANTÍA: Kubernetes no puede matar un pod viejo si no hay uno nuevo listo
+  maxSurge: 1         # Permite crear un pod temporal extra en el nodo alterno antes de la limpieza
+
+# Escudo contra el Descheduler (PodDisruptionBudget nativo)
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2   # GARANTÍA: Al menos 2 pods de CoreDNS DEBEN estar respondiendo peticiones siempre
+
+# Sondas de salud integradas (Garantizan que el Pod está listo antes de apagar el anterior)
+livenessProbe:
+  enabled: true
+readinessProbe:
+  enabled: true
+
+# Deshabilitamos nodeSelector clásico para usar reglas avanzadas de afinidad
+nodeSelector: {}
+
+# Tolerancias vacías: Evita que herede toleraciones genéricas que le permitan
+# viajar por accidente a los nodos máster taintados.
+tolerations: []
+
+# Afinidad Avanzada de Nodos y Pods
+affinity:
+  # REGLA A: Definir en qué tipos de workers SÍ puede vivir CoreDNS
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: custom-role
+              operator: In
+              values:
+                - "ops"   # Nodo de observabilidad/seaweedfs
+                - "apps"  # Nodo de aplicaciones (Java, Go, Keycloak)
+                - "data"  # Nodo de bases de datos
+              # Nota: Al no listar "heavy", Apache Pulsar y ScyllaDB quedan 100% protegidos de ruido DNS.
+
+  # REGLA B: Anti-afinidad flexible (Best-Effort)
+  # Intenta distribuir, pero no se rompe si hay pocos nodos Proxmox disponibles.
+  # Esto significa: "Intenta por todos los medios no poner dos CoreDNS en el mismo nodo Proxmox, pero si no
+  # hay otra opción para mantener las 3 réplicas vivas, colócalas juntas"
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100 # Máxima prioridad a no compartir nodo
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: k8s-app
+                operator: In
+                values:
+                  - coredns
+          topologyKey: "kubernetes.io/hostname"
+
+
+# Parámetros de Recursos Garantizados (Evita desalojos "OOMKilled")
+resources:
+  limits:
+    cpu: 300m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Configuración Corefile
+# Al instalar Talos con el CoreDNS por defecto, en el configmap, en Corefile tiene las siguientes
+# configuraciones que replicaremos en este values:
+# data:
+#   Corefile: |
+#     .:53 {
+#         errors
+#         health {
+#             lameduck 5s
+#         }
+#         ready
+#         log . {
+#             class error
+#         }
+#         prometheus :9153
+
+#         kubernetes cluster.local in-addr.arpa ip6.arpa {
+#             pods insecure
+#             fallthrough in-addr.arpa ip6.arpa
+#             ttl 30
+#         }
+#         forward . /etc/resolv.conf {
+#            max_concurrent 1000
+#         }
+#         cache 30 {
+#            disable success cluster.local
+#            disable denial cluster.local
+#         }
+#         loop
+#         reload
+#         loadbalance
+#     }
+servers:
+  - zones:
+      - zone: .
+    port: 53
+    plugins:
+      - name: errors
+      - name: health
+        configBlock: |-
+          lameduck 5s
+      - name: ready
+      - name: log
+        parameters: .
+        configBlock: |-
+          class error
+      - name: prometheus
+        parameters: :9153
+      - name: kubernetes
+        parameters: cluster.local in-addr.arpa ip6.arpa
+        configBlock: |-
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+          ttl 30
+      - name: forward
+        # En caso de habilitar hostDNS, parameters aquí debería ser: . 1.1.1.1 8.8.8.8
+        parameters: . /etc/resolv.conf
+        configBlock: |-
+          max_concurrent 1000
+      - name: cache
+        parameters: 30
+        configBlock: |-
+          disable success cluster.local
+          disable denial cluster.local
+      - name: loop
+      - name: reload
+      - name: loadbalance
+
+# Service / DNS Cluster IP (Estándar de Kubernetes)
+# Esta dirección IP es el Service IP que Kubernetes le asigna a CoreDNS dentro del clúster.
+# Por estándar en la industria, si el rango de red de los servicios (serviceCIDR) es el por
+# defecto de Kubernetes (10.96.0.0/12), a la décima IP (10.96.0.10) se le asigna el DNS
+# https://medium.com/@arjun0451/coredns-in-openshift-01f3142bde25
+service:
+  clusterIP: "10.96.0.10" # Verificar que este CIDR coincida con el clusterPodNets en Talos
+
+# Monitoreo (Opcional, deshabilitado por defecto)
+prometheus:
+  monitor:
+    enabled: false
