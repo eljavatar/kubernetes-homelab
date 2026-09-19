@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-vso-auth-sa
+  namespace: playground
+
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: vault-auth-playground
+  namespace: playground
+# https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultauthspec
+spec:
+  # required configuration
+  # VaultConnectionRef of the corresponding VaultConnection CustomResource.
+  # If no value is specified the Operator will default to the `default` VaultConnection,
+  # configured in its own Kubernetes namespace.
+  # vaultConnectionRef: vault-connection
+
+  vaultAuthGlobalRef:
+    # Si no se especifica el namespace y name, el operador de Vault buscará un VaultAuthGlobal
+    # llamado 'default' en los siguientes namespaces:
+    # - En el namespace donde se crea este mismo recurso VaultAuth
+    # - En el namespace donde se instaló el operador VSO
+    # Sin embargo, para esto se requiere configurar spec.vaultAuthGlobalRef.allowDefault=true
+    # y habilitar controller.manager.globalVaultAuthOptions.allowDefaultGlobals=true en el
+    # archivo values de instalación de VSO (lo cual ya viene por defecto así)
+    name: vault-auth-global-eljavatar-k8s
+    # Si no se especifica el namespace, se buscará el VaultAuthGlobal con nombre 'vault-auth-global'
+    # en el mismo namespace de este recurso VaultAuth
+    namespace: vault-secrets-operator
+
+  # Method to use when authenticating to Vault.
+  # No necesitamos definir el método de autenticación, porque en el vault-auth-global ya
+  # especificamos que el método por defecto es 'kubernetes'
+  # method: kubernetes
+
+  # Estos los podemos omitir porque se heredan de 'vault-auth-global'
+  # # Mount to use when authenticating to auth method.
+  # mount: eljavatar_k8s/kubernetes
+
+  # # Kubernetes specific auth configuration, requires that the Method be set to kubernetes.
+  # kubernetes:
+  #   # role to use when authenticating to Vault
+  #   role: global-dynamic-reading-role
+  #   # ServiceAccount to use when authenticating to Vault
+  #   serviceAccount: vault-vso-auth-sa
+  #   audiences:
+  #     - vault
+
+
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: playground-sa
+  namespace: playground
+  annotations:
+    vault.hashicorp.com/alias-metadata-env: demo
+
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: vault-auth-demo
+  namespace: playground
+# https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultauthspec
+spec:
+
+  vaultAuthGlobalRef:
+    name: vault-auth-global-eljavatar-k8s
+    namespace: vault-secrets-operator
+
+  # Method to use when authenticating to Vault.
+  # Lo heredamos del VaultAuthGlobal
+  # method: kubernetes
+
+  # Para este caso la SA y el rol son distintos, por lo tanto los definimos para que sobreescriban
+  # los valores heredados de 'vault-auth-global'. EL resto de valores se mantienen
+  # https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultauthconfigkubernetes
+  kubernetes:
+    # role to use when authenticating to Vault
+    role: playground-test-role
+    # ServiceAccount to use when authenticating to Vault
+    serviceAccount: playground-sa # El namespace es el mismo de este VaultAuth

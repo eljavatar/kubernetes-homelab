@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-server-ca-issuer
+spec:
+  # https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.VaultIssuer
+  vault:
+    server: "https://192.168.0.20:8200"
+    path: secret/eljavatar_k8s/pki/sign/eljavatar-home-cert-issuer
+    # Le pasamos la CA para resolver el error 'unknown authority' de cert-manager hacia Vault
+    caBundleSecretRef:
+      name: vault-ca-bootstrap # Se asume el namespace 'cert-manager' implícitamente
+      key: ca.crt
+    auth:
+      # https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.VaultKubernetesAuth
+      kubernetes:
+        mountPath: /v1/auth/eljavatar_k8s/kubernetes
+        role: cert-manager-ca-role
+        serviceAccountRef:
+          name: cert-manager # Se asume el namespace 'cert-manager' implícitamente
+          audiences:
+            - vault-cert-manager

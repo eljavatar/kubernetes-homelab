@@ -33,6 +33,7 @@ resource "proxmox_virtual_environment_vm" "talos_pmx01" {
     interface    = "scsi0"
     size         = each.value.disk_size
     file_format  = "raw"
+    discard      = "on"
   }
 
   # La lectora de CD-ROM que monta la ISO de Talos (La API lo maneja de forma nativa)
@@ -91,6 +92,7 @@ resource "proxmox_virtual_environment_vm" "talos_pmx02" {
     interface    = "scsi0"
     size         = each.value.disk_size
     file_format  = "raw"
+    discard      = "on"
   }
 
   # La lectora de CD-ROM que monta la ISO de Talos (La API lo maneja de forma nativa)

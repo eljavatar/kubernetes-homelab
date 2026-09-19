@@ -1,0 +1,58 @@
+
+# Default values: https://artifacthub.io/packages/helm/stakater/reloader/2.2.17?modal=values
+# https://docs.stakater.com/reloader/1.4/installation/install-oss.html#common-configurations
+
+reloader:
+  # Por defecto, Reloader ve en todos los namespaces. Para ver en un solo namespace,
+  # deberíamos setear esta propiedad en 'false'
+  watchGlobally: true
+  # Si watchGlobally=false, reloader vería solo lo que se incluya en esta lista, y en caso de estar vacía,
+  # vería solo lo del namespace donde se instale Reloader
+  namespaces: []
+
+  # Podemos ignorar el monitoreo en namespaces específicos
+  ignoreNamespaces: ""
+
+  resourceLabelSelector: "" # Comma separated list of k8s label selectors for configmap/secret selection
+
+  # Ignorar Jobs y CronJobs del monitoreo de Reloader
+  # Useful when you don't want CronJobs to be restarted when their referenced ConfigMaps/Secrets change
+  ignoreCronJobs: false
+  # Useful when you don't want Jobs to be restarted when their referenced ConfigMaps/Secrets change
+  ignoreJobs: false
+
+  # En caso de desplegar más de una réplica, deberíamos habilitar HA
+  enableHA: false
+
+  # Por defecto, es env-vars, pero esto puede causar problemas si Argo CD se configura con auto-sync
+  # https://docs.stakater.com/reloader/1.4/how-to-guides/use-reloader-with-argocd.html
+  reloadStrategy: annotations
+
+  # Si las cargas de trabajo son recursos de Argo Rollout, podemos habilitar la compatibilidad
+  # con Argo Rollout en Reloader:
+  # https://docs.stakater.com/reloader/1.4/how-to-guides/use-reloader-with-argocd.html#using-argo-rollouts
+  # https://argoproj.github.io/rollouts/
+  # Por el momento lo dejamos deshabilitado
+  isArgoRollouts: false
+
+  deployment:
+    replicas: 1
+
+    nodeSelector:
+      kubernetes.io/hostname: "worker-ops-02"
+    
+    resources:
+      requests:
+        cpu: 10m
+        memory: 128Mi
+      limits:
+        cpu: 150m
+        memory: 512Mi
+
+  # Si se utiliza el operador de Prometheus (kube-prometheus-stack o similar), podemos habilitar
+  # el PodMonitor integrado.
+  # Si no se habilita, igual se pueden extraer las métricas a través del endpoint /metrics
+  # en el puerto 9090 que reloader expone
+  # https://docs.stakater.com/reloader/1.4/how-to-guides/monitor-reloader.html
+  podMonitor:
+    enabled: false

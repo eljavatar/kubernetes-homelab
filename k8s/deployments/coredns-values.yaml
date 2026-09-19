@@ -68,14 +68,14 @@ affinity:
 # Parámetros de Recursos Garantizados (Evita desalojos "OOMKilled")
 resources:
   limits:
-    cpu: 300m
-    memory: 256Mi
+    cpu: 500m       # Evita el estrangulamiento (throttling) durante picos de microservicios levantándose
+    memory: 256Mi   # Si el clúster supera los 300-400 servicios, lo podríamos subir a 512Mi
   requests:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 100m       # Garantiza tiempo de cómputo para procesar ráfagas de consultas UDP/TCP
+    memory: 128Mi   # Base segura para almacenar la caché y objetos Service del clúster
 
 # Configuración Corefile
-# Al instalar Talos con el CoreDNS por defecto, en el configmap, en Corefile tiene las siguientes
+# Al instalar Talos con el CoreDNS por defecto, en el configmap, en Corefile se tienen las siguientes
 # configuraciones que replicaremos en este values:
 # data:
 #   Corefile: |
@@ -89,7 +89,10 @@ resources:
 #             class error
 #         }
 #         prometheus :9153
-
+#         hosts {
+#             192.168.0.20 vault.eljavatar.home
+#             fallthrough
+#         }
 #         kubernetes cluster.local in-addr.arpa ip6.arpa {
 #             pods insecure
 #             fallthrough in-addr.arpa ip6.arpa
@@ -122,6 +125,11 @@ servers:
           class error
       - name: prometheus
         parameters: :9153
+      # El bloque hosts lo usamos de la misma forma que haríamos con el archivo /etc/hosts en Linux o Mac
+      - name: hosts
+        configBlock: |-
+          192.168.0.20 vault.eljavatar.home
+          fallthrough
       - name: kubernetes
         parameters: cluster.local in-addr.arpa ip6.arpa
         configBlock: |-
@@ -129,7 +137,7 @@ servers:
           fallthrough in-addr.arpa ip6.arpa
           ttl 30
       - name: forward
-        # En caso de habilitar hostDNS, parameters aquí debería ser: . 1.1.1.1 8.8.8.8
+        # En caso de habilitar hostDNS (en Talos), parameters aquí debería ser: . 1.1.1.1 8.8.8.8
         parameters: . /etc/resolv.conf
         configBlock: |-
           max_concurrent 1000

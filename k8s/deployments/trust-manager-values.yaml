@@ -16,9 +16,6 @@ app:
     seccompProfile:
       type: RuntimeDefault
 
-nodeSelector:
-  kubernetes.io/hostname: "worker-ops-02"
-
 # Configuración para autorizar la replicación de secretos
 secretTargets:
   enabled: false # Cambiar a true únicamente si se va a distribuir llaves en formato Secret TLS en vez de ConfigMaps
@@ -27,3 +24,11 @@ secretTargets:
 nodeSelector:
   #node-role.kubernetes.io/ops: "true"
   kubernetes.io/hostname: "worker-ops-02"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

@@ -1,0 +1,35 @@
+# Default values: https://artifacthub.io/packages/helm/hashicorp/vault-secrets-operator/1.5.1?modal=values
+# https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/helm
+
+controller:
+  nodeSelector:
+    kubernetes.io/hostname: "worker-ops-02"
+
+  manager:
+    # A diferencia de ESO, en VSO no cargamos el certificado como un volumen
+    # Lo haríamos mediante defaultVaultConnection.caCertSecret (lo que crearía un VaultConnection
+    # con nombre 'default' en el mismo namespace donde se instala VSO), o directamente en los
+    # recursos VaultConnection que creemos
+    volumes: []
+    # Para ver los parámetros que acepta, ejecutamos:
+    # kubectl run vso-es-help --image=hashicorp/vault-secrets-operator:1.5.1 --rm -it --restart=Never -- --help
+    # En caso de que no se elimine cuando terminemos: kubectl delete pod vso-es-help
+    extraArgs: {}
+
+# Si habilitamos esto, se creará un VaultConnection con nombre 'default' en el mismo namespace
+# donde se instala el operador, y sería usado por los recursos que no especifiquen una referencia
+# a un VaultConnection específico.
+defaultVaultConnection:
+  enabled: false
+
+# Si habilitamos esto, se creará un VaultAuthMethod con nombre 'default' en el mismo namespace
+# donde se instala el operador, y sería usado por los recursos que no especifiquen una referencia
+# a un VaultAuthMethod específico.
+defaultAuthMethod:
+  enabled: false
+
+# Las métricas las obtendremos mediante VictoriaMetrics y OpenObserve, por tanto deshabilitamos
+# por ahora la telemetría, ya que esto requeriría tener instalado el operador de Prometheus
+telemetry:
+  serviceMonitor:
+    enabled: false

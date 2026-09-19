@@ -2,7 +2,7 @@
 
 # Gracias a que Talos configura kubePrism, se levanta un proxy local en cada nodo para comunicarse
 # con la API de kubernetes a través del puerto 7445. Esto nos evita tener que colocar la IP del
-# clúster y su puerto, que en nuestro caso es la VIP 192.168.0.39 y 6443 respectivamente.
+# clúster y su puerto, que en nuestro caso es la VIP 192.168.0.30 y 6443 respectivamente.
 k8sServiceHost: localhost
 k8sServicePort: 7445
 
@@ -14,10 +14,20 @@ operator:
   enabled: true
   rollOutPods: true
   replicas: 1
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/hostname: "worker-ops-02"
   prometheus:
     enabled: true # Salen por el puerto 9963
     serviceMonitor:
       enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+  resources:
+    limits:
+      cpu: 500m 
+      memory: 256Mi # Si manejamos más de 1000 pods globales, podríamos requerir subirlo a 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
 
 identityAllocationMode: crd
 enableK8sEndpointSlice: true
@@ -88,12 +98,6 @@ l2announcements:
   leaseRetryPeriod: 1s
 ingressController:
   enabled: false
-envoy:
-  enabled: true
-  prometheus:
-    enabled: true # Sale por el puerto 9964
-    serviceMonitor:
-      enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
 gatewayAPI:
   enabled: true
   # Activa el Application-Layer Protocol Negotiation en los listeners TKS/HTTPS del Gateway de Cilium
@@ -101,6 +105,21 @@ gatewayAPI:
   # Permite que el Gateway de Cilium utilice el campo 'appProtocol' de los Services de Kubernetes para
   # saber qué protocolo hablar con los pods
   enableAppProtocol: true
+
+envoy:
+  enabled: true
+  prometheus:
+    enabled: true # Sale por el puerto 9964
+    serviceMonitor:
+      enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+  resources:
+    # El Envoy también es crítico, por tanto, si lo requerimos, eventualmente lo podríamos dejar sin límite
+    limits:
+      cpu: 2000m  # Le damos espacio para procesar ráfagas
+      memory: 1Gi # Podemos ajustar de acuerdo al volumen real de conexiones HTTP concurrentes
+    requests:
+      cpu: 100m
+      memory: 256Mi
 
 # Sería últil si el router es compatible con BGP. Si el router no es compatible, es mejor dejarlo desactivado
 # bgpControlPlane:
@@ -128,12 +147,35 @@ hubble:
       enabled: true # Sale por el puerto 9966
       serviceMonitor:
         enabled: false # Lo deshabilitamos para evitar conflictos al pedir los CRDs de prometehus
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi # Es vital monitorear este límite si se usa mucho Hubble UI o CLI
+      requests:
+        cpu: 50m
+        memory: 128Mi
   ui:
     enabled: true
     replicas: 1
     # Forzar a Hubble UI (la interfaz gráfica) a correr en el nodo de Ops
     nodeSelector:
       kubernetes.io/hostname: "worker-ops-02"
+    backend:
+      resources:
+        limits:
+          cpu: 100m
+          memory: 128Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+    frontend:
+      resources:
+        limits:
+          cpu: 200m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
   metrics:
     enableOpenMetrics: true # Habilita el estándar en puerto 9965. Requerido para httpV2 y exemplars
     # https://docs.cilium.io/en/v1.18/observability/metrics/#hubble-metrics
@@ -214,10 +256,14 @@ cgroup:
 
 # Agent resources
 resources:
+  # Al ser el motor de red CNI del clúster basado en eBPF, Se recomienda dejar sin límite (limits: null)
+  # ó poner holguras muy altas 2-4 vCPU y 2Gi-4Gi RAM
   limits:
     cpu: 2
     memory: 2Gi
+  # Si tenemos alta rotación de pods/red (por ejemplo, ante escalados masivos), podemos
+  # subir la vCPU a 500m o 1000m. Para la memoria RAm se recomienda 512Mi para entornos
+  # productivos, pero para el caso de nuestro homelab, 256Mi está bien
   requests:
-    cpu: 100m
+    cpu: 200m
     memory: 256Mi
-

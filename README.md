@@ -1,26 +1,34 @@
-
 # Introducción
 
 Este repositorio está dedicado a mostrar el proceso de creación y configuración de un homelab, el cual albergará sobre Proxmox un clúster de Kubernetes usando Máquinas Virtuales (VMs) de Talos Linux, lo cual facilitará la configuración de las VMs y creación del clúster desde Terraform.
 
 La iniciativa de crear un homelab dedicado a albergar un clúster de Kubernetes partió de la necesidad de poder ejecutar diversos servicios que uso en el desarrollo de mis aplicaciones.
 
-Inicialmente, usaba Kind en mi máquina local (una Macbook Pro) para levantar un clúster de kubernetes con un control-plane y 3 workers, y con las 16 GB de RAM de dicha máquina, en principio era suficiente para correr un par de aplicaciones y un par de DBs de Postgress, y eventualmente un servicio de almacenamiento de objetos tipo S3 como lo es SeaweedFS. Sin embargo, cuando quería levantar servicios de Observabilidad, el clúster se colgaba debido a la falta de recursos de mi Mac (principalmente por falta de memoria RAM).
+Inicialmente, usaba Kind en mi máquina local (una Macbook Pro) para levantar un clúster de kubernetes con un control-plane y 3 workers. Con las 16 GB de RAM de dicha máquina, en principio era suficiente para correr un par de aplicaciones y un par de DBs de Postgres, y eventualmente un servicio de almacenamiento de objetos tipo S3 como lo es SeaweedFS. Sin embargo, cuando quería levantar servicios de Observabilidad, el clúster se colgaba debido a la falta de recursos de mi Macbook (principalmente por falta de memoria RAM).
 
 En ese orden de ideas tenía 2 opciones:
 
 1. Buscar algún proveedor económico en la nube para crear mi clúster de Kubernetes.
 2. Crear mi propio homelab en casa.
 
-Teniendo en cuenta que esto es algo que pienso mantener por bastante tiempo, y que eventualmente tendré más servicios en mi clúster (como por ejemplo un servicio de mensajería tipo Kafka o Apache Púlsar), la opción 1 podría volverse un poco costosa a largo plazo (con valores que fácilmente podrían llegar a superar los 150 USD mensuales).
+Teniendo en cuenta que esto es algo que pienso mantener por bastante tiempo, y que eventualmente tendré más servicios en mi clúster (como por ejemplo un servicio de mensajería tipo Kafka o Apache Púlsar), la opción 1 podría volverse un poco costosa a largo plazo (con valores que fácilmente podrían llegar a superar los 200 USD mensuales).
 
 Por tanto, me decidí por la opción 2, para lo cual tuve que adquirir un router, un switch, un par de Mini PCs, cableado, etc. Así pues, la configuración de hardware que uso para este homelab es la siguiente:
 
 - **Internet:** Starlink gen 2 con el respectivo adaptador Ethernet.
 - **Router:** Tp-link Archer AX55 (eventualmente pienso cambiarlo por un router que me de redundancia de conectividad como por ejemplo el Tp-link Omada ER706W-4G).
 - **Switch:** Tp-link Tl-SG108E.
-- 2 mini PCs GMKtec M7 Ultra (con Ryzen 7 Pro 6850U (8C / 16T)) con 32 GB de RAM y 1 TB de almacenamiento cada uno (1 NVMe) (eventualmente pienso agregar más mini PCs).
+- 2 Mini PCs GMKtec M7 Ultra (con Ryzen 7 Pro 6850U (8C / 16T)) con 32 GB de RAM y 1 TB de almacenamiento cada uno (1 NVMe) (eventualmente pienso agregar más mini PCs).
 - Macbook Pro desde la cual accedo a todo (a la interfaz web de Proxmox, al router, al switch, al cúster de kubernetes vía `kubectl`, etc).
+
+**Tecnologías Usadas**
+
+- Proxmox v9.2
+- Talos v1.13.4
+- Kubernetes 1.36
+- HashiCorp Vault v2.0.4 (sobre un LXC con Debian 12)
+- Terraform v1.15.6
+- Helm v1.4
 
 
 
@@ -34,8 +42,7 @@ El TP-Link Archer AX55 manejará el enrutamiento y el Wi-Fi, mientras que el swi
 4. **MacBook Pro:** Se conecta vía Wi-Fi al Archer AX55 (gracias al router, tendrá visibilidad total hacia el switch y las Mini PCs).
 
 
-
-## Diseño del Direccionamiento IP y Segmentación (La Red)
+### Diseño del Direccionamiento IP y Segmentación (La Red)
 
 Para un homelab con Kubernetes (Talos) y Proxmox, no es buena idea tener IPs dinámicas, ya que si un nodo cambia de IP, el clúster se rompe. Por tal razón, debido a que el Gatwey de mi router es `192.168.0.1`, usaré la subred estándar `192.168.0.0/24`, pero dividiendo el direccionamiento de forma estricta:
 
@@ -57,9 +64,9 @@ Para un homelab con Kubernetes (Talos) y Proxmox, no es buena idea tener IPs din
 
 ## Dependencias (en Macbook Pro)
 
-Estas dependencias son requeridaqs para trabajar con Terraform y Kubernetes desde la máquina local (en mi caso, una MacBook)
+Estas dependencias son requeridas para trabajar con Terraform y Kubernetes desde la máquina local (en mi caso, como estoy usando una Macbook, usaré `brew` para instalar paquetes; en caso de usar Linux también se podría usar `brew`, aunque dependiendo de la distribución se podría usar el gestor nativo (`apt`, `dnf`, `yum`, `pacman`, etc.); en caso de usar Windows, se podrían usar alternativas como `winget`, `chocolatey` o `scoop`):
 
-- Homebrew (para instalar paquetes en Mac)
+- **Homebrew** (para instalar paquetes en Mac):
 ```sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
@@ -71,7 +78,7 @@ brew --version
 brew upgrade
 ```
 
-- Terraform (para automatizar creación de VMs sobre Proxmox y configuración del clúster)
+- **Terraform** (para automatizar creación de VMs sobre Proxmox y configuración del clúster):
 ```sh
 brew tap hashicorp/tap
 brew install hashicorp/tap/terraform
@@ -81,7 +88,7 @@ terraform version
 # Terraform v1.15.6
 ```
 
-- Talosctl (para interactuar con el sistema operativo inmutable de las VMs de Proxmox)
+- **Talosctl** (para interactuar con el sistema operativo inmutable de las VMs de Proxmox):
 ```sh
 brew install talosctl
 
@@ -95,7 +102,7 @@ talosctl version
 # 	OS/Arch:     darwin/amd64
 ```
 
-- Kubectl (para administrar el clúster de Kubernetes una vez esté vivo)
+- **Kubectl** (para administrar el clúster de Kubernetes una vez esté vivo):
 ```sh
 brew install kubernetes-cli
 
@@ -105,16 +112,16 @@ kubectl version
 # Kustomize Version: v5.8.1
 ```
 
-- k9s (para monitorear y gestionar clústeres de Kubernetes desde la terminal)
+- **k9s** (para monitorear y gestionar clústeres de Kubernetes desde la terminal):
 ```sh
 brew install derailed/k9s/k9s
 
 # Validar instalación
-k9s verion
+k9s version
 # Version:    v0.51.0
 ```
 
-- Helm (para instalar servicios en el clúster de kubernetes)
+- **Helm** (para instalar servicios en el clúster de kubernetes):
 ```sh
 brew install helm
 
@@ -123,7 +130,7 @@ helm version
 # version.BuildInfo{Version:"v4.1.3", GitCommit:"c94d381b03be117e7e57908edbf642104e00eb8f", GitTreeState:"clean", GoVersion:"go1.26.1", KubeClientVersion:"v1.35"}
 ```
 
-- Helmfile y plugins de helm
+- **Helmfile** y plugins de helm:
 ```sh
 brew install helmfile
 
@@ -136,7 +143,7 @@ helm plugin install https://github.com/databus23/helm-diff --verify=false
 helm plugin install https://github.com/jkroepke/helm-secrets --verify=false
 ```
 
-- Cilium-cli (para administrar y depurar Cilium CNI en clústers de Kubernetes)
+- **Cilium-cli** (para administrar y depurar Cilium CNI en clústers de Kubernetes):
 ```sh
 brew install cilium-cli
 
@@ -148,7 +155,7 @@ cilium version
 # cilium image (running): unknown. Unable to obtain cilium version. Reason: release: not found
 ```
 
-- Watch (para pruebas y monitoreo de procesos en tiempo real)
+- **Watch** (para pruebas y monitoreo de procesos en tiempo real):
 ```sh
 brew install watch
 
@@ -157,7 +164,7 @@ watch -version
 # watch from procps-ng 4.0.6
 ```
 
-- Stern (para visualizar logs de Kubernetes de forma rápida)
+- **Stern** (para visualizar logs de Kubernetes de forma rápida):
 ```sh
 brew install stern
 
@@ -166,12 +173,24 @@ stern --version
 # version: 1.33.1
 ```
 
+- **Vault** (para gestionar la bóveda de secretos de Vault a través de su CLI):
+```sh
+brew tap hashicorp/tap
+brew install hashicorp/tap/vault
+
+# Validar instalación
+vault version
+# Vault v2.0.4
+```
+
+Para validar que tenemos instaladas las dependencias que requerimos, podemos ejecutar `make check-deps`.
+
 
 ### Configuración Post-Instalación de Dependencias (Opcionales)
 
 #### Terraform
 
-- Autocompletado de comandos
+- Autocompletado de comandos:
 ```sh
 # Bash
 terraform -install-autocomplete
@@ -181,7 +200,7 @@ autoload -U +X bashcompinit && bashcompinit
 complete -o nospace -C /usr/local/bin/terraform terraform
 ```
 
-- Variables de entorno útiles
+- Variables de entorno útiles:
 ```sh
 # Deshabilitar telemetría (opcional)
 export CHECKPOINT_DISABLE=1
@@ -210,7 +229,7 @@ Con la red lista, se preparan las Mini PCs:
    - Descargar la última versión estable de Proxmox VE ISO Installer desde su página oficial; en mi caso, la `9.2`.
    - Flashear la ISO de Proxmox VE en una USB (de por lo menos 4 GB) usando BalenaEtcher (o si se desea, también se puede usar Rufus en Windows). En caso de usar Rufus, si pregunta en qué modo escribir, seleccionar "DD Image mode".
 
-2. **Instalación en Mini PC 1 y Mini PC 2 (Nodos de Proxmox):** Para esto, conectamos temporalmente un monitor y teclado a cada Mini PC, introducimos la USB, encendemos la Mini PC presionando la tecla para entrar al menú de arranque (Boot Menu, en mi caso, `ESC`) y seleccionamos la USB. Desde el asistente gráfico de Proxmox, seguimos las siguientes instrucciones:
+2. **Instalación en Mini PC 1 y Mini PC 2 (Nodos de Proxmox):** Para esto, conectamos temporalmente un monitor y teclado a cada Mini PC (también podríamos usar un JetKVM en caso de disponer de uno), introducimos la USB, encendemos la Mini PC presionando la tecla para entrar al menú de arranque (Boot Menu, en mi caso, `ESC`) y seleccionamos la USB. Desde el asistente gráfico de Proxmox, seguimos las siguientes instrucciones:
 
    - **Target Harddisk:** Seleccionar el disco NVMe de 1 TB.
    - **Country / Timezone:** Configurar la ubicación y zona horaria.
@@ -311,7 +330,7 @@ Es importante aclarar un mito técnico: en los procesadores modernos de Intel y 
 2. **Autosuspend de USB y Tarjetas de Red:** Si las Mini PCs usan adaptadores de red de alta velocidad internos o externos que admitan este modo, `powertop` podría bajarles la energía durante segundos de baja actividad, provocando caídas momentáneas en los latidos (*keepalives*) del clúster de Talos, asumiendo falsamente que un nodo murió.
 
 
-### 3. Recomendación de Arquitectura para este Homelab
+### 3. Recomendación para Optimizar el Consumo de Energía para este Homelab
 
 Para lograr un balance perfecto (ahorrar energía sin poner en riesgo las bases de datos), seguiremos la siguiente estrategia en la Shell de Proxmox de pmx-01 y pmx-02:
 
@@ -359,6 +378,14 @@ Además, no está de más asegurar que la interfaz de red virtual (`vmbr0`) est�
 
 
 
+# Instalación de HashiCorp Vault en Proxmox
+
+Para ver cómo Instalar y Configurar HashiCorp Vault en nuestro HomeLab (el cual usaremos como almacen y administrador de secretos para nuestro clúster de Kubernetes), ir a su respectivo [README](VAULT_README.md) que se encuentra en este mismo repositorio.
+
+
+
+
+
 # Preparación para la Automatización (Terraform + Talos)
 
 ## Planificación de la Topología para el Clúster de Kubernetes (Talos Linux)
@@ -381,17 +408,17 @@ Para aprovechar al máximo los 32 hilos y 64 GB de RAM, dejando aproximadamente 
 
 1. 🖥️ **Mini PC 1 (pmx-01)** (Disponible: 16 vCPUs / 32 GB RAM -> Consumo estimado: 14 vCPUs asignadas y 26 GB de RAM):
    - `cp-01` **(Control Plane 1)**: 2 vCPUs, 3 GB RAM, 20 GB Disco.
-   - `cp-02` **(Control Plane 2)**: 2 vCPUs, 3 GB RAM, 20 GB Disco.
-   - `worker-data-01` **(Worker de Bases de Datos y Storage)**: 4 vCPUs, 10 GB RAM, 300 GB Disco.
+   - `cp-03` **(Control Plane 2)**: 2 vCPUs, 3 GB RAM, 20 GB Disco (cuando agreguemos una tercera Mini PC, moveremos este control plane a dicha Mini PC).
+   - `worker-data-01` **(Worker de Bases de Datos y Storage)**: 4 vCPUs, 10 GB RAM, 400 GB Disco.
      - *Servicios asignados:* Postgres (Primary), MongoDB (Primary), SeaweedFS (Master/Volume 1), Redis, Etcd.
    - `worker-apps-01` **(Worker de Aplicaciones y Serverless)**: 6 vCPUs, 10 GB RAM, 100 GB Disco.
      - *Servicios asignados:* Apps en Java y Go, Knative/OpenFaaS, Keycloak, Frontend.
 
 2. 🖥️ **Mini PC 2 (pmx-02)** (Disponible: 16 vCPUs / 32 GB RAM -> Consumo estimado: 14 vCPUs asignadas y 26 GB de RAM):
-   - `cp-03` **(Control Plane 3)**: 2 vCPUs, 3 GB RAM, 20 GB Disco.
+   - `cp-02` **(Control Plane 3)**: 2 vCPUs, 3 GB RAM, 20 GB Disco.
    - `worker-heavy-02` **(Worker para Cargas Pesadas e Infraestructura)**: 6 vCPUs, 12 GB RAM, 200 GB Disco.
      - *Servicios asignados:* Apache Pulsar (BookKeeper, Broker, ZooKeeper), ScyllaDB.
-   - `worker-ops-02` **(Worker de Observabilidad y Réplicas)**: 6 vCPUs, 11 GB RAM, 300 GB Disco.
+   - `worker-ops-02` **(Worker de Observabilidad y Réplicas)**: 6 vCPUs, 11 GB RAM, 400 GB Disco.
      - *Servicios asignados:* VictoriaMetrics, OpenObserve, Pyroscope, Grafana, Réplicas de Postgres/MongoDB (en caso de armar clusters de DB), SeaweedFS (Volume 2).
 
 ### Beneficios de esta distribución:
@@ -404,7 +431,9 @@ Para aprovechar al máximo los 32 hilos y 64 GB de RAM, dejando aproximadamente 
 
 
 
-## Configuración de las Credenciales del Proveedor en Proxmox
+## Configuración de las Credenciales que usará el Proveedor de Proxmox desde Terraform
+
+_**Nota:** Los pasos a continuación describen la forma en que creamos el API Token de Autenticación en Proxmox que usaremos desde Terraform, sin embargo, en [este enlace](https://registry.terraform.io/providers/bpg/proxmox/0.110.0/docs#api-token-authentication) se detalla cómo podríamos hacerlo a través de la shell de cada Nodo de Proxmox._
 
 Para que Terraform pueda conectarse a las Mini PCs y crear las VMs, necesita un token de acceso seguro. Se debe hacer este proceso en ambas Mini PCs (`https://192.168.0.10:8006` y `https://192.168.0.11:8006`):
 
@@ -434,11 +463,11 @@ Para que Terraform pueda conectarse a las Mini PCs y crear las VMs, necesita un 
 
 
 
-## Generar llave SSH
+## Generar llave SSH para Acceder a Proxmox desde Terraform
 
-Aunque Talos no usa SSH de forma nativa (se administra 100% vía API con `talosctl`), y aunque el proveedor `bpg/proxmox` utiliza la API web (puerto `8006`) para casi todo (crear la estructura de la VM, asignar RAM, CPUs y encenderla), la infraestructura de Proxmox sí requiere la conectividad SSH de Terraform para preparar el terreno (que para nuestro caso de configuración automática, será para subir los snippets con la configuración 0).
+Aunque Talos no usa SSH de forma nativa (se administra 100% vía API con `talosctl`), y aunque el proveedor `bpg/proxmox` utiliza la API web (puerto `8006`) para casi todo (crear la estructura de las VMs, asignar RAM, CPUs y encenderlas), la infraestructura de Proxmox sí requiere la conectividad SSH de Terraform para preparar el terreno (que para nuestro caso de configuración automática, será para subir los snippets con la configuración 0).
 
-1. Así que el primer paso, es generar la llave:
+1. El primer paso es generar la llave en nuestra máquina local:
 
    ```sh
    ssh-keygen -t ed25519 -C "correo@email.com" -f ~/.ssh/id_proxmox_terraform
@@ -446,9 +475,10 @@ Aunque Talos no usa SSH de forma nativa (se administra 100% vía API con `talosc
    # Terraform automatice las conexiones sin pedir claves interactivamente.
    ```
 
-2. El siguiente paso es configurar el archivo SSH Config para que la máquina local (en mi caso mi Mac) sepa exactamente qué clave usar cuando se conecta a Proxmox. Para esto, editamos o abrimos el archivo de configuración:
+2. El siguiente paso es configurar el archivo SSH Config para que la máquina local sepa exactamente qué clave usar cuando se conecta a Proxmox. Para esto, editamos el archivo de configuración:
 
    ```sh
+   # Abrimos el archivo
    nano ~/.ssh/config
    ```
 
@@ -501,7 +531,7 @@ Para obtener la imagen preconstruída se deben seguir los siguientes pasos:
 
 
 
-## Descargar la imagen en servidor Proxmox
+## Descargar la imagen en el servidor Proxmox
 
 Después de haber generado la imagen de Talos, se debe agregar dicha imagen en cada Nodo de Proxmox. Aquí tenemos 2 opciones: subir un iso, o descargarla directamente al Nodo desde algún enlace.
 
@@ -621,13 +651,14 @@ Al finalizar, nos mostrará nuestro túnel en estado `Inactive`, ya que aún no 
 
 ## Crear los archivos Terraform para crear el Clúster de Kubernetes
 
-Para gestionar dos nodos independientes de Proxmox que formarán un único clúster de Kubernetes de forma limpia, utilizaremos el proveedor moderno `bpg/proxmox` (en este caso, la versión 0.110.0). Así pues, creamos en la raíz del proyecto los siguientes archivos (el contenido de los archivos `variables.tf`, `locals.tf`, `providers.tf` y `main.tf` se pueden revisar en este mismo repositorio):
+Para gestionar dos nodos independientes de Proxmox que formarán un único clúster de Kubernetes de forma limpia, utilizaremos el proveedor moderno `bpg/proxmox` (en este caso, la versión 0.110.0). Así pues, creamos en la carpeta `terraform/` los siguientes archivos (el contenido de dichos archivos se puede revisar en este mismo repositorio (excepto el archivo `terraform/terraform.tfvars`)):
 
-- `terraform.tfvars`: En este archivo crearemos variables de entorno que usarán los otros archivos de terraform, como por ejemplo, el api_token de los nos nodos de proxmox (este archivo debe agregarse al `.gitignore` para evitar exponer secretos o variables sensibles):
+- `terraform.tfvars`: En este archivo crearemos variables de entorno que usarán los otros archivos de terraform, como por ejemplo, el api_token de los nos nodos de proxmox (este archivo lo agregamos al `.gitignore` para evitar exponer secretos o variables sensibles):
 
   ```bash
   pmx01_token = "terraform-prov@pve@pam!tf-token=SECRET_DE_PMX01"
   pmx02_token = "terraform-prov@pve@pam!tf-token=SECRET_DE_PMX02"
+  vault_token = "TOKEN_DE_LOGIN_DE_VAULT"
   # Estas variables a continuación solo serían necesarias si tenemos un dominio Cloudflare,
   # y ejecutamos terraform usando use_prod_domain=true
   personal_email = "personal-email@example.com"
@@ -643,7 +674,11 @@ Para gestionar dos nodos independientes de Proxmox que formarán un único clús
 
 - `providers.tf`: En este archivo especificamos los provider de proxmox para cada una de los nodos, los cuales tendrán como endpoint la respectiva IP de cada nodo (`https://192.168.0.10:8006/` y `https://192.168.0.11:8006/`).
 
-- `main.tf`: En este archivo especificamos las VMs que se crearán en cada uno de los nodos de proxmox, indicando detalles como por ejemplo el id de la VM, el Nodo sobre el cual se crearán (el provider), la memoria asignada, la cantidad de cores y el espacio en disco asignado; además, también hacemos el bootstrap automático del clúster y toda la configuración inicial de forma automática.
+- `main.tf`: En este archivo especificamos las VMs que se crearán en cada uno de los nodos de proxmox, indicando detalles como por ejemplo el id de la VM, el Nodo sobre el cual se crearán (el provider), la memoria asignada, la cantidad de cores y el espacio en disco asignado; además, también hacemos el bootstrap automático del clúster.
+
+- `k8s-bootstrap.tf`: En este archivo especificamos la configuración y componentes que requerimos para que nuestro clúster de Kubernetes quede en un estado Ready to Work (CNI, CoreDNS, CSI, etc.).
+
+- `talos-patches.tf`: Actualmente este archivo no contiene nada, pero en caso de que en el futuro se requiera realizar un cambio directamente sobre una VM (como por ejemplo cambiar los DNS), lo definiríamos en este archivo.
 
 
 
@@ -652,17 +687,22 @@ Para gestionar dos nodos independientes de Proxmox que formarán un único clús
 Una vez creados los archivos `variables.tf`, `local.tf`, `providers.tf` y `main.tf` y el archivo secreto `terraform.tfvars` protegido por el `.gitignore`, debemos ejecutar los siguientes comandos en la terminal (desde la ruta del proyecto donde se encuentran estos archivos, no en la `shell` de los nodos de Proxmox):
 
 ```sh
+# NOTA: Por lo general se suele usar solamente comandos como 'terraform init', 'terraform apply', etc., sin
+# embargo, para evitar saltar hasta el directorio 'terraform/' que es donde tenemos nuestros scripts de
+# terraform, usamos el flag global -chdir, el cual le indica a Terraform que cambie temporalmente su entorno
+# de ejecución a la carpeta especificada antes de correr cualquier subcomando
+
 # 1. Descargar los plugins y los proveedores (bpg/proxmox, siderolabs/talos, etc.)
-terraform init
+terraform -chdir=terraform init
 
 # 2. Validar que la sintaxis sea correcta y no existan errores
-terraform validate
+terraform -chdir=terraform validate
 
 # 3. Ver una previsualización de lo que Terraform va a crear en Proxmox
-terraform plan
+terraform -chdir=terraform plan
 
 # 4. Crear de forma masiva las 7 máquinas virtuales (confirmar escribiendo yes)
-terraform apply
+terraform -chdir=terraform apply
 # Por defecto, el script de Terraform está preparado para ejecutar con las siguientes propiedades:
 # - auto_config_cluster=true -> Crea las VMs en Proxmox, hace el bootstrap del clúster y deja el clúster
 #   con todas las configuraciones necesarias para empezar a usarlo. Si se asigna a false, Solo crea las
@@ -680,15 +720,35 @@ terraform apply
 #   de su servidor ACME de Staging (solo tiene efecto si use_prod_domain=true).
 
 # Aquí vemos un ejemplo de cómo usar estas variables:
-terraform apply \
+terraform -chdir=terraform apply \
   -var="auto_config_cluster=false" \
   -var="is_development=false" \
   -var="use_local_iso=true" \
-  -var="use_prod_domain=false"
+  -var="use_prod_domain=false" \
+  -var="use_letsencrypt_prod=true"
 
-# Para ver más comandos y opciones de lo que podemos hacer con Terraform, podemos ver este recurso de 
+# Para ver más comandos y opciones de lo que podemos hacer con Terraform, podemos ver este recurso didáctico de 
 # 90 días de DevOps con Roxs, donde dedican un par de secciones solo a Terraform:
 # https://90daysdevops.295devops.com/semana-04/dia22/
+
+
+# Alternativa para evitar pasar el flag '-chdir=terraform' en cada comando:
+# Debido a que configuramos un archivo 'Makefile' podríamos ejecutar los comandos de terraform mediante 'make':
+make tf-init
+
+make tf-validate
+
+make tf-plan
+
+make tf-apply
+
+# En caso de querer pasar parámetros:
+make tf-apply \
+  AUTO_CONFIG_CLUSTER=false \
+  IS_DEVELOPMENT=false \
+  USE_LOCAL_ISO=true \
+  USE_PROD_DOMAIN=false \
+  USE_LETSENCRYPT_PROD=true
 ```
 
 Si no se obtiene ningún error, el `apply` creará las respectivas VMs en cada uno de los Nodos de Proxmox e inicializará el clúster (`bootstrap`). Además si se ejecuta con `auto_config_cluster=true`, se configurará todo el clúster de forma automática (CNI, Certificados, Almacenamiento, etc.).
@@ -697,7 +757,7 @@ Si no se obtiene ningún error, el `apply` creará las respectivas VMs en cada u
 
 # Bootstrap del Clúster (El Nacimiento de Kubernetes)
 
-Por lo general, para inicializar el clúster con Talos se suelen seguir una serie de pasos en los que primero se genera una configuración usando `talosctl`, y se aplican dichas configuraciones a cada VM según corresponda (si es controlplane o si es worker), para finalmente hacer el `bootstrap` (inicialización del clúster). Sin embargo, mediante Terraform, y usando el provider de `siderolabs/talos` podemos generar toda esta configuración automáticamente. Así pues, aquí veremos estas 2 formas de inicializar nuestro clúster: la forma automática y la forma manual.
+Por lo general, para inicializar un clúster con Talos se suelen seguir una serie de pasos mediante los cuales primero se genera una configuración usando `talosctl`, y se aplican dichas configuraciones a cada VM según corresponda (si es `controlplane` o si es `worker`), para finalmente hacer el `bootstrap` (inicialización del clúster). Sin embargo, mediante Terraform, y usando el provider de `siderolabs/talos` podemos generar toda esta configuración automáticamente. Así pues, aquí veremos estas 2 formas de inicializar nuestro clúster: la forma automática y la forma manual.
 
 
 
@@ -729,7 +789,7 @@ export TALOSCONFIG=./talos/talosconfig
 
 ## Opción B: Bootstrap Manual
 
-Este es el camino manual, y esto requeriría en primer lugar, eliminar (o comentar) el código del archivo `main.tf` y agregar el código que se encuentra en el archivo `main.tf.manual`. En tal caso, las variables que explicamos anteriormente que se pueden usar al hacer el `terraform apply`, dejarían de cobrar relevancia, ya que se deberían realizar manualmente cada una de las configuraciones que se explican en las siguientes secciones.
+Este es el camino manual, y esto requeriría en primer lugar, eliminar (o comentar) el código del archivo `terraform/main.tf` y agregar el código que se encuentra en el archivo `terraform/main.tf.manual`; además debemos también eliminar (o comentar) el código del archivo `terraform/k8s-bootstrap.tf`. En tal caso de querer hacer el bootstrap del clúster a través de esta forma, las variables que explicamos anteriormente que se pueden usar al hacer el `terraform apply`, dejarían de cobrar relevancia, ya que se deberían realizar manualmente cada una de las configuraciones que se explican en las siguientes secciones.
 
 
 ### Generar los Archivos de Configuración del Clúster
@@ -1193,7 +1253,8 @@ Dado que creamos la infraestructura con Terraform, no es necesario borrar nada a
 Estando ubicados en la carpeta del repositorio (donde tenemos el archivo `main.tf`), ejecutamos lo siguiente:
 
 ```sh
-terraform destroy
+make tf-destroy
+# O: terraform -chdir=terraform destroy
 ```
 
 Esto apagará y eliminará por completo las VMs de los nodos de Talos en ambas Mini PCs que estén configuradas en el archivo `main.tf` (que en este caso son 7), liberando CPU, RAM y almacenamiento.
@@ -2519,6 +2580,304 @@ Sin embargo, como LVM y ZFS requieren binarios en el host que Talos Linux no inc
 ## Instalación de Componentes utilitarios
 
 
+### Operadores Para Manejar Secretos Externos
+
+Para inyectar dentro de un servicio o aplicación, variables que contienen datos sensibles como por ejemplo tokens o contraseñas, solemos hacerlo a través de secretos. El problema de los secretos nativos de Kubernetes es que se guardan en texto plano codificado en Base64 (codificado no significa cifrado o encriptado) y por lo tanto debemos procurar evitar subir estos archivos `.yaml` de secretos a nuestro repositorio, ya que cualquiera podría decodificarlos y robar nuestros datos sensibles.
+
+Como vimos en secciones anteriores, hay diversas estrategias que podríamos usar para crear archivos de secretos con marcadores tipo `${VAR}` de modo tal que podemos leer variables de entorno y, a través de `envsubst` inyectamos dichos valores en memoria temporal y se los pasamos a `kubectl` sin modificar el archivo `.yaml` original del secreto que contiene los marcadores tipo `${VAR}`; de este modo, podríamos subir estos archivos de secretos sin riesgo de exponer datos sensibles.
+
+Esta estrategia de usar marcadores tipo `${VAR}` sería útil para ejecuciones manuales mediante `kubectl apply`, sin embargo, no es una estrategia que podamos aplicar si queremos implementar un flujo de despliegue continuo mediante GitOps (por ejemplo usando ArgoCD o FluxCD).
+
+Al trabajar con GitOps, nuestro repositorio de Git (que en nuestro caso es GitHub, pero podría ser cualquier otro, como por ejemplo GitLab) se convierte en la fuente de verdad, y por tanto, solo se desplegará en el clúster lo que subamos a través de nuestros commits. Esto quiere decir, que para que se pueda levantar un secreto en el clúster debemos implementar alguna estrategia para que dicho secreto se suba cifrado al repositorio de Git, de modo tal que cuando la herramienta de CD que usemos lo vaya a aplicar/instalar, lo pueda descifrar de forma segura.
+
+Entre las principales estrategias que tenemos para lograr esto, tenemos **SealedSecrets** (de Bitnami), **SOPS** (de Mozilla) y operadores externos como **External Secrets Operator** (ESO) ó **Vault External Operator** (VSO) + Vault. En la siguiente tabla comparativa podemos apreciar las principales diferencias entre estas tres herramientas:
+
+| Característica | SealedSecrets | Mozilla SOPS | ESO ó VSO + Vault |
+|----------------|---------------|--------------|-----------------------------------------|
+| **¿Qué se sube a Git?** | Un archivo encriptado (`SealedSecret`). | El archivo YAML original pero con los campos de datos cifrados. | Solo **referencias o punteros** (nombres de llaves), ningún dato real. |
+| **Dependencia del Clúster** | Atado al clúster (usa la llave privada del pod controlador). | Agnóstico al clúster (usa llaves PGP/Age o KMS externas). | Totalmente agnóstico. El clúster solo lee del almacén externo. |
+| **Rotación de Credenciales** | Manual y tediosa. | Manual (requiere re-encriptar con la CLI). | **Automática**. Se cambia el valor del secreto en Vault y se actualiza solo en Kubernetes. |
+| **Estándar de Producción** | Para Equipos pequeños / Proyectos legacy. | Para Equipos medianos / Automatizaciones CI-CD. | El estándar de facto para Enterprise. |
+
+#### ¿Cuál es la alternativa más recomendable para nuestro Homelab?
+
+La alternativa más recomendable es usar un operador externo (ESO o VSO) combinado con HashiCorp Vault (el cual ya hemos [instalado previamente en un LXC sobre Proxmox](#instalaci%C3%B3n-de-hashicorp-vault-en-proxmox)), y las razones son las siguientes (podríamos usar los dos operadores, sin embargo hay que tener en cuenta que *VSO* está pensando para trabajar estrictamente con Vault ya que permite gestionar todos sus recursos nativos, como por ejemplo los secretos de tipo *database* que permiten rotación automática de credenciales, mientras que *ESO* es una opción multi-provider que nos permitiría trabajar también con otros almacenes como por ejemplo Doppler, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, etc.):
+
+1. **Desacoplamiento Absoluto (Verdadero GitOps):** Con *SealedSecrets* o *SOPS*, si nuestro clúster físico colapsa por completo y perdemos los respaldos de las llaves maestras de cifrado, los archivos en nuestro repositorio de GitHub se vuelven basura ilegible e irrecuperable. Con **ESO** y **VSO**, los datos confidenciales reales están seguros y centralizados en nuestra bóveda (Vault). Reconstruir el homelab desde cero es tan fácil como levantar un nuevo clúster, instalar el operador externo, apuntar a Vault y ver cómo todo vuelve a la vida de inmediato.
+
+2. **Simulación de Escenarios Corporativos Reales:** En el mundo empresarial moderno de alta regulación, nunca se permite que un desarrollador cifre un secreto a mano con una CLI y lo empuje a Git y por tanto, normalmente el equipo de seguridad provee un Administrador de Secretos (KMS / Vault). Aprender el flujo de trabajo por ejemplo de ESO (crear recursos `SecretStore` y `ExternalSecret`) nos brindará las habilidades exactas que exigen los entornos de producción actuales.
+
+3. **Rotación Automática y Auditoría:** Si necesitamos cambiar la contraseña de una base de datos, solo la actualizamos en la interfaz o API de Vault. El operador externo (ya sea ESO o VSO) detectará el cambio en minutos, actualizará el secreto nativo de Kubernetes y (si añadimos una herramienta complementaria muy popular llamada *Reloader*) reiniciará automáticamente los Pods para que carguen la nueva credencial sin intervención manual. Además, Vault guardará logs estrictos de auditoría de qué servicios del clúster están leyendo qué contraseñas.
+
+Además, estos operadores externos están pensados para centralizar el flujo de autenticación y comunicación con Vault, lo cual evita que tengamos que desplegar sidecards adicionales junto a nuestras aplicaciones para extraer los secretos.
+
+Pero antes de instalar los operadores en nuestro clúster, debemos hacer unas configuraciones previas que veremos a cotninuación.
+
+#### Creación de la ServiceAccount para el Revisor de Tokens en Vault
+
+Para que Vault pueda verificar los tokens que le envíen nuestros operadores (ESO o VSO), necesita tres datos del clúster de Kubernetes: la URL de la API, el certificado CA para que Vault confíe en los certificados TLS de nuestro clúster (no confundir con el internal CA que generamos previamente) y un token con permisos para revisar identidades (`TokenReview`).
+
+La URL de la API de kubernetes la podemos obtener sin tener que configurar nada adicional, sin embargo, para obtener el certificado y el token, la forma más limpia y recomendada es crear una `ServiceAccount` dedicada para Vault dentro del clúster y usar su token de larga duración (ya que Vault está fuera del clúster (en un LXC) y necesita una credencial permanente para hablar con la API de Kubernetes).
+
+Para eso, ejecutamos los siguientes comandos:
+
+```sh
+# Creamos el namespace
+kubectl apply -f k8s/external-auth-namespace.yaml
+
+# Creamos la ServiceAccount del Reviewer y su respectivo token
+kubectl apply -f k8s/vault-token-reviewer-setup.yaml
+```
+
+Cabe recalcar que a partir de Kubernetes 1.24+, las Service Accounts ya no guardan un token estático y permanente en un objeto tipo `Secret`, por eso, como se puede apreciar en el archivo `k8s/vault-token-reviewer-setup.yaml`, tuvimos que crear explícitamente un secreto de larga duración de tipo `kubernetes.io/service-account-token`.
+
+Después de esto, podemos ejecutar los siguientes comandos para obtener los datos que necesitamos para configurar el método de autenticación de Kubernetes en Vault (en el [README de Vault](VAULT_README.md#3-extraer-datos-para-configurar-la-autenticaci%C3%B3n-en-vault) mostramos cómo usar estos datos):
+
+```sh
+# Obtener la URL de la API de Kubernetes (En nuestro caso: https://192.168.0.30:6443)
+K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+
+# Obtener el token del revisor
+K8S_TOKEN=$(kubectl get secret vault-token-reviewer-secret -n external-auth -o jsonpath='{.data.token}' | base64 --decode)
+
+# Obtener el certificado CA del clúster
+K8S_CA=$(kubectl get secret vault-token-reviewer-secret -n external-auth -o jsonpath='{.data.ca\.crt}' | base64 --decode)
+```
+
+#### Automatización de la Sincronización del Certificado de Vault Server 
+
+Como vimos en el paso de [exponer el certificado de Vault](VAULT_README.md#exponer-el-certificado-vía-http-dentro-del-lxc), para que los clientes (como el operador de ESO) puedan verificar la identidad del servidor de Vault, deben usar el mismo certificado TLS implementado para las conexiones HTTPS en la configuración de Vault, y es por eso que expusimos dicho certificado a través de un servidor web en la ruta `http://192.168.0.20/certs/vault.crt`, lo cual nos permitiría descargar su contenido directamente en una `ConfigMap` o en `Secret` de la siguiente forma:
+
+```sh
+# Así lo descargaríamos para el ConfigMap que requeriría ESO
+kubectl create configmap vault-ca-cert \
+  --from-file=vault-ca.crt=<(curl -s http://192.168.0.20/certs/vault.crt) \
+  -n external-secrets
+
+# Así lo descargaríamos para el Secret que requeriría VSO
+# A diferencia de ESO, con VSO el certtificado TLS del servidor de Vault no se puede cargar
+# mediante un ConfigMap. VSO requiere obligatoriamente que sea un Secret y que la clave se
+# guarde con el nombre ca.crt, ya que VSO busca ese campo específico de forma predeterminada
+kubectl create secret generic vault-ca-cert \
+  --from-file=ca.crt=<(curl -s http://192.168.0.20/certs/vault.crt) \
+  -n vault-secrets-operator
+```
+
+Sin embargo, como vimos también en la sección de [renovación automática del certificado](VAULT_README.md##renovación-automática-del-certificado), éste cambia periódicamente y por tanto, el certificado que descarguemos ahora, sólo nos servirá para las configuraciones iniciales que necesitemos hacer en nuestro clúster de Kubernetes, ya que después de un tiempo dicho certificado dejará de funcionar.
+
+Por lo tanto, ya que el certificado en el LXC de Vault se renueva cada X cantidad de tiempo (3 meses según la configuración que realizamos), del mismo modo deberíamos procurar tener desde nuestro clúster de Kubernetes una forma automatizada de obtener dicho certificado actualizado.
+
+Si bien es cierto que desde el mismo Cron Job que regenera el certificado en el LXC de Vault podríamos invocar un comando `kubectl` para escribir el certificado en un `Secret` o `ConfigMap` de nuestro clúster después de que se actualice, esto implicaría tener que copiar el archivo `~/.kube/config` en el contenedor LXC, pero en entornos de producción lo ideal es prevenir que una máquina virtual, contenedor o servicio externo (como Vault) tenga permisos de administración (`kubectl`) sobre el clúster por motivos de seguridad.
+
+Por tanto, nuestra alternativa será que en lugar de que el LXC "empuje" el certificado hacia Kubernetes, hagamos que Kubernetes vaya a "buscar" el certificado al LXC, y para esto, crearemos un `CronJob` nativo de Kubernetes que corra cada 8 horas (podría ser menos ya que el consumo de recursos de este job sería muy ínfimo, pero para el caso de nuestro Homelab, este tiempo está bien). Si bien el certificado se renueva en el LXC cada 3 meses, es difícil controlar el gap entre cuando corre el job en el LXC vs cuando corre el job en nuestro clúster, por eso lo configuramos con mucho menos tiempo, ya que en el peor de los casos, el clúster tendrá el certificado desactualizado solo por 8 horas hasta la próxima ejecución del job.
+
+Así pues, el pod de este CronJob ejecutará un comando `curl` hacia el LXC de Vault, descargará el archivo `.crt`, actualizaría los `ConfigMap` y `Secret` localmente y haría un `rollout restart` de los operadores. Para esto, el Pod que crea el job usaría una `ServiceAccount` interna del clúster con permisos estrictos únicamente sobre esos recursos, lo cual en efecto es mucho más seguro que permitir que un servicio externo tenga acceso a nuestro clúster.
+
+Para crear este `CronJob` ejecutamos los siguientes comandos:
+
+```sh
+# 1. Crear los namespaces
+# Creamos el namespace donde correrá el job
+kubectl apply -f k8s/shared-ops-namespace.yaml
+# Creamos los namespaces donde se insalarán posteriormente los operadores ESO y VSO, ya
+# que dentro de ellos crearemos el ConfigMap y Secret con el certificado TLS de Vault.
+# Además en estos también crearemos el RoleBinding que necesita la ServiceAccount del Job
+kubectl apply -f k8s/eso-namespace.yaml
+kubectl apply -f k8s/vso-namespace.yaml
+
+# 2. Crear y Asignar permisos mediante RBAC (Role-Based Access Control)
+# El CronJob necesita permisos exclusivos para actualizar el ConfigMap y el Secert que
+# leen los operadores ESO y VSO
+kubectl apply -f k8s/vault-cert-syncer-rbac.yaml
+
+# 3. Crear el CronJob (tarea programada) que ejecutará los jobs cada 8 horas
+kubectl apply -f k8s/deployments/vault-cert-syncer-cronjob.yaml
+
+# Si revisamos la lista de configmaps y secrets, podemos
+# apreciar que aún no existe uno llamado 'vault-ca-cert'
+kubectl get configmap -n external-secrets -o wide
+kubectl get secret -n vault-secrets-operator -o wide
+```
+
+Como podemos apreciar, aún no existe el `ConfigMap` y el `Secret` que necesitarán ESO y VSO respectivamente, y eso se debe a que solo hemos creado la *tarea programada* (el `CronJob`), es decir, aún no se ha ejecutado nada. Para que se creen/actualicen estos recursos necesitamos que se ejecute esta tarea (el `Job`), para lo cual podríamos esperar 8 horas (que es la periodicidad que le confguramos al CronJob), o forzar una primera ejecución manual mediante la creación de un Job, lo cual haremos a continuación:
+
+```sh
+# Hacemos una primera ejecución del Job para que se cree el ConfigMap y el Secret
+# en los namespaces de ESO y VSO respectivamente
+kubectl create job first-sync-vault-cert-manual \
+  --from=cronjob/sync-vault-cert \
+  -n shared-ops
+
+# Vemos la lista de jobs creados (deben quedar en estado Completed):
+kubectl get jobs -n shared-ops -o wide
+
+# Vemos los pods creados por los jobs (deben quedar en estado Completed):
+# READY quedaría 0/1 ya que el pod finaliza apenas termina la ejecución del Script
+kubectl get pods -n shared-ops -o wide
+
+# Verificamos que no hayan errores en los logs
+kubectl logs -n shared-ops -l job-name=first-sync-vault-cert-manual -f --tail=50
+
+# Validamos que en efecto ya existe el configmap y secret 'vault-ca-cert'
+kubectl get configmap -n external-secrets -o wide
+kubectl get secret -n vault-secrets-operator -o wide
+```
+
+El Script que se ejecuta dentro del pod que crea el job está pensado para actualizar estos recursos (el ConfigMap y el Secret) solo cuando el certificado descargado del servidor de Vault (del LXC) se renueva, por tanto, si ejecutamos un segundo job de prueba podremos ver que no se actualiza el ConfigMap y el Secret ya que actualmente el certificado es el mismo del servidor de Vault:
+
+```sh
+# Ejecutamos un segundo job de prueba
+kubectl create job second-sync-vault-cert-manual \
+  --from=cronjob/sync-vault-cert \
+  -n shared-ops
+
+# Validamos el resultado en los logs
+kubectl logs -n shared-ops -l job-name=second-sync-vault-cert-manual --tail=50
+```
+
+Ahora sí procedemos con la instalación de los operadores de ESO y VSO.
+
+#### Instalación de ESO
+
+Para instalar External Secrets Operator, ejecutamos los siguientes comandos:
+
+```sh
+# Agregamos el repositorio
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+
+# Instalamos
+helm upgrade --install external-secrets external-secrets/external-secrets --version 2.9.0 \
+  --namespace external-secrets \
+  -f k8s/deployments/eso-values.yaml
+```
+
+Para validar la instalación podemos ejecutar lo siguiente:
+
+```sh
+# Validamos que se crearon los pods (los pods de webhook y cert-controller suelen tardar
+# un poco en quedar en READY=1/1):
+kubectl get pods -n external-secrets -o wide
+
+# Podemos validar también los CRDs que se crearon
+kubectl get crds | grep external-secrets
+```
+
+#### Instalación de VSO
+
+Para instalar Vault Secrets Operator, ejecutamos los siguientes comandos:
+
+```sh
+# Agregamos el repositorio
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update
+
+# Instalamos
+helm upgrade --install vault-secrets-operator hashicorp/vault-secrets-operator --version 1.5.1 \
+   --namespace vault-secrets-operator \
+   -f k8s/deployments/vso-values.yaml
+```
+
+Para validar la instalación podemos ejecutar lo siguiente:
+
+```sh
+# Validamos que se creó el pod:
+kubectl get pods -n vault-secrets-operator -o wide
+
+# Podemos validar también los CRDs que se crearon
+kubectl get crds | grep secrets.hashicorp.com
+```
+
+**Manifiestos Globales de Configuración de VSO**
+
+A diferencia de ESO, en VSO no se usa un certificado global montado dentro del Pod, pero nos da la flexibilidad de usar un `VaultConnection` y `VaultAuthGlobal` que a pesar de que se crean en un namespace específico (como por ejemplo en el que instalamos VSO), actúan como de ámbito global, lo que permite referenciarlos desde recursos `VaultAuth` ubicados en cualquier otro namespace.
+
+De este modo, como el certificado se referencia solo en el `VaultConnection`, podemos tener un único recurso de este tipo y por ende, un solo `Secret` con el certificado TLS de vault (que es el que creamos y actualizamos periódicamente mediante el job), lo cual no se puede hacer con ESO (a menos que use solo `ClusterSecretStore`), ya que el recurso (`SecretStore`) que maneja los datos de conexión (URL del servidor de Vault y certificado TLS para hacer handshake) es el mismo que maneja los datos de autenticación (por eso en ESO cargamos el ConfigMap con el certificado como volumen en el pod, para así evitar crear dicho ConfigMap en cada namespace que se necesite crear un SecretStore).
+
+Por tanto, a continuación crearemos nuestros recursos `VaultConnection` y `VaultAuthGlobal` sobre el mismo namespace de VSO (y no por ejemplo en `external-auth`), ya que no son componentes de infraestructura general de autenticación (como el Token Reviewer), sino la configuración core del motor de VSO, por tanto, toda configuración global que dicta cómo opera una herramienta debe residir dentro del "límite de confianza" (trust boundary) de este operador.
+
+Además, mantenerlos en `vault-secrets-operator` asegura que el plano de control de VSO esté centralizado y sea autocontenido. Por tanto, si necesitamos respaldar, migrar o auditar la configuración de VSO, sabemos que todo está en un único namespace.
+
+Así pues, ejecutamos entonces los siguientes comandos:
+
+```sh
+# Creamos la Conexión Global
+kubectl apply -f k8s/vso-vault-connection.yaml
+
+# Validamos que se haya creado el recurso 'vault-connection'
+# Debe quedar HEALTHY=True y READY=True
+kubectl get vaultconnections -n vault-secrets-operator -o wide
+
+# Creamos nuestro Configuración de Autenticación Global
+kubectl apply -f k8s/vso-vault-auth-global.yaml
+
+# Validamos que se haya creado el recurso 'vault-auth-global-eljavatar-k8s'
+# En este caso no vemos ningún estado, ya que un VaultAuthGlobal como tal no realiza
+# ninguna acción de autenticación. Simplemente lo creamos con datos de configuración
+# genéricos que podemos heredar después a los recursos VaultAuth.
+kubectl get vaultauthglobals -n vault-secrets-operator -o wide
+
+# En caso de que el VaultConnection no se cree correctamente, podemos revisar
+# los logs del controlador de VSO para encontrar la causa del error:
+kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-controller-manager -f --tail=50
+```
+
+
+### Reloader
+
+Hay un problema clásico en Kubernetes: si inyectamos secretos o configuraciones como variables de entorno (`env`), el Pod no se enterará del cambio hasta que se reinicie.
+
+Para solucionar esto, y hacer que las aplicaciones en el clúster se enteren instantáneamente de un cambio en un `Secret` o un `ConfigMap` que se está usando sin tener que reiniciar los Pods a mano, se utiliza una herramienta del ecosistema de CNCF llamada **Reloader** (de Stakater).
+
+Para instalar reloader, ejecutamos lo siguiente:
+
+```sh
+# Agregamos el repositorio
+helm repo add stakater https://stakater.github.io/stakater-charts
+helm repo update
+
+# Instalamos
+helm install reloader stakater/reloader --version 2.2.17 \
+  --namespace reloader --create-namespace
+  -f k8s/deployments/reloader-values.yaml
+```
+
+Para verificar la instalación, ejecutamos:
+
+```sh
+kubectl get pods -n reloader
+
+kubectl logs -n reloader -l app=reloader-reloader
+```
+
+A pesar de que estamos desplegando Reloader con la config `reloader.watchGlobally=true`, la cual hace que Reloader pueda ver los cambios en secretos y configmaps en todos los namespaces, no quiere decir que éste actúe automáticamente sobre todos los pods, ya que para que Reloader pueda lanzar un `rollout restart` se requiere que en el manifiesto del deployment se agregue una anotación (ver la documentación oficial de [How Reloader Works](https://docs.stakater.com/reloader/1.4/architecture/how-it-works.html#step-3-workload-matching)):
+
+```yaml
+metadata:
+  annotations:
+    # Existen varias anotaciones que podríamos usar, sin embargo, aquí muestro algunas de las
+    # más comunes. No quiere decir que se deban usar todas, ya que depende de lo que requiramos
+    # En la documentación se puede encontrar la lista de anotaciones que podemos usar:
+    # https://docs.stakater.com/reloader/1.4/reference/annotations.html#workload-annotations
+    # https://docs.stakater.com/reloader/1.4/index.html#annotation-patterns
+
+    # Supervisa todos los ConfigMaps y Secrets a los que hace referencia la carga de trabajo.
+    reloader.stakater.com/auto: "true"
+
+    # Observa uno o más Secretos nombrados explícitamente:
+    secret.reloader.stakater.com/reload: "database-secret,api-keys"
+
+    # Observa explícitamente uno o más ConfigMaps que coinciden con estos nombres.
+    configmap.reloader.stakater.com/reload: "app-config,feature-flags"
+
+    # Habilita el modo de búsqueda. Reloader solo iniciaría un reinicio cuando un ConfigMap o
+    # Secret referenciado también tenga la anotación 'reloader.stakater.com/match: "true"'.
+    # Se utiliza junto con match para dar a los dueños de Secret/ConfigMap control sobre
+    # qué recursos activan las recargas.
+    reloader.stakater.com/match: "true"
+```
+
+
 ### Descheduler
 
 Al usar `preferredDuringSchedulingIgnoredDuringExecution` (como en nuestro caso con CoreDNS), Kubernetes no rebalancea los Pods por sí solo una vez que las Mini PCs se estabilizan tras un reinicio masivo. Es decir, si por ejemplo se reinicia primero la Mini PC 2 que la Mini PC 1, las tres instancias de CoreDNS caerán en la VM de `ops` que se encuentra en la Mini PC 2, y estas permanecerán ahí a menos que se fuerce un rollout manual.
@@ -2651,7 +3010,7 @@ Labels:           app.kubernetes.io/instance=coredns
 
 Con estas validaciones, confirmamos que el Descheduler que configuraremos si tendrá efecto sobre nuestros pods de CoreDNS.
 
-#### Instalación de Deschduler
+#### Instalación de Descheduler
 
 Para instalar el descheduler, ejecutamos los siguientes comandos (en el archivo `descheduler-values.yaml` especifiqué algunas configuraciones según los requerimientos de este homelab, sin embargo en el [repositorio de GitHub](https://github.com/kubernetes-sigs/descheduler) se pueden encontrar más opciones de configuración):
 
@@ -2912,7 +3271,9 @@ El único escenario donde si se debería considerar la instalación de Headlamp 
 
 
 
-# Prueba de Tráfico hacia nuestro Clúster
+# Pruebas de Componentes y Configuraciones
+
+## Prueba de Tráfico hacia nuestro Clúster
 
 Hasta el momento hemos hecho lo siguiente para configurar la red de nuestro clúster y para permitir tráfico seguro tanto interno como externo, ya sea proveniente de un entorno local o de internet:
 
@@ -2927,6 +3288,7 @@ Hasta el momento hemos hecho lo siguiente para configurar la red de nuestro clú
 9. Creamos un certificado (`cert-letsencrypt-public`) para tráfico proveniente desde internet (`eljavatar.org`) usando el emisor de Let's Encrypt (`letsencrypt-stage-issuer` o `letsencrypt-prod-issuer`).
 10. Levantamos nuestro Gateway (`external-gateway`) usando el controlador de cilium y especificando 3 listeners: 1 para tráfico http, uno para tráfico https proveniente desde tráfico local (el cual para su configuración de TLS usa el secreto `cert-gateway-local-secret`) y uno para tráfico https proveniente desde internet (el cual para su configuración de TLS usa el secreto `cert-letsencrypt-public-secret`).
 11. Levantamos el agente de `clouflared` para permitir tráfico público desde internet hacia nuestro clúster mediante nuestro dominio `eljavatar.org` y usando un túnel de Cloudflare.
+12. Instalamos varias utilidades como como por ejemplo operadores para manejar secretos de Vault, Reloader, Deschduler y Metrics Server.
 
 En cada uno de estos pasos fuimos realizando distintas comprobaciones para verificar que cada servicio que instalamos y cada recurso que levantamos, se hubiera instalado/levantado correctamente.
 
@@ -3246,5 +3608,143 @@ Las razones principales de este tipo de error podrían ser las siguientes (las c
 
   El proxy Envoy de Cilium validará que este host encaja perfectamente dentro de la regla comodín `*.eljavatar.org` de nuestro listener `https-publico`, completará exitosamente el handshake TLS utilizando el Secret de Let's Encrypt y redirigirá el tráfico sin contratiempos hacia el `HTTPRoute` de la aplicación Nginx de prueba, devolviendo un código HTTP/2 200 en el navegador, y por ende, la respectiva página de bienvenida a Nginx.
 
+
+
+## Prueba de Descarga de Secretos Externos
+
+### Crear Secretos y Roles en Vault
+
+Primero, vamos a crear en Vault los secretos que vamos a usar para esta prueba (debemos haber habilitado previamente el [Secret engine de KV-v2](VAULT_README.md#crear-un-secret-de-tipo-key-value-kv-v2)):
+
+```sh
+vault kv put secret/eljavatar_k8s/kv-v2/playground/nginx-app NGINX_USERNAME=nginx_user NGINX_PASSWORD=nginx123
+
+vault kv put secret/eljavatar_k8s/kv-v2/demo TEST_USERNAME=test TEST_PASSWORD=test123
+```
+
+El rol genérico `global-dynamic-reading-role` que creamos cuando [configuramos los roles en Vault](VAULT_README.md#crear-roles-para-dar-acceso-a-los-secretos-de-vault) nos permitirá acceder al secreto `/playground/nginx-app` que acabamnos de crear debido a la Templated policy `eljavatar_k8s-read-kv_v2_data_by_ns_tmpl` que definimos, pero para el caso del secreto `/demo`, debemos habilitar un rol custom:
+
+```sh
+vault write auth/eljavatar_k8s/kubernetes/role/playground-test-role \
+    bound_service_account_names="playground-sa" \
+    bound_service_account_namespaces="playground" \
+    token_policies=eljavatar_k8s-read-kv_v2_data_by_custom_env_tmpl \
+    audience=vault \
+    ttl=1h
+```
+
+
+### Desplegar una App de Prueba con Secretos extraídos con ESO
+
+Para esta prueba, debemos asegurarnos que no exista el namespace `playground`, para lo cual ejecutamos primero `kubectl delete ns plaground`.
+
+Para levantar la aplicación, ejecutamos lo siguiente, lo cual además de levantar el pod, creará los recursos `ServiceAccount`, `SecretStorage` y `ExternalSecrets` requeridos para que ESO pueda descargar los secretos de Vault y genere un `Secret` de Kubernetes:
+
+```sh
+# Levantamos la aplicación. Para esto, tenemos 2 opciones:
+# A) Montando los secretos en el deployment como Variables de entorno
+kubectl apply -f tests/playground-nginx-with-secrets-inside-envs.yaml
+# B) Montando los secretos en el deployment como Volumenes
+kubectl apply -f tests/playground-nginx-with-secrets-inside-volumes.yaml
+
+
+# Validamos que se creó el pod
+kubectl get pods -n playground -o wide
+
+# Verificamos que se crearon los secrets
+kubectl get secrets -n playground -o wide
+
+# Validamos en los logs del pod que se obtuvieron los datos correctos:
+kubectl logs -n playground deployment.apps/playground-nginx-app --tail=50
+
+# Al finalizar la prueba, podríamos simplemente eliminar el namespace:
+kubectl delete ns playground
+```
+
+Al ejecutar la línea que muestra los logs, deberíamos ver un resultado como el siguiente:
+
+```text
+=== VERIFICANDO SECRETOS DESDE EL POD ===
+Usuario recuperado del secret playground/nginx-app:  nginx_user
+Password recuperado del secret playground/nginx-app: nginx123
+Usuario recuperado del secret demo:  test
+Password recuperado del secret demo: test927
+=========================================
+```
+
+Las dos opciones de despliegue soportan que el Pod pueda ver cambios en los secretos si un secreto se actualiza en Vault (por ejemplo, si ejecutamos ahora `vault kv put secret/eljavatar_k8s/kv-v2/playground/nginx-app NGINX_USERNAME=nginx_user NGINX_PASSWORD=nginx456`). La diferencia es que la opción A usa Reloader para hacer un reinicio del Pod (lo que crearía un nuevo Pod), mientras que la opción B, al usar volumenes no requiere usar reloader ni hacer reinicios manuales, pero requiere que las aplicaciones soporten *File Watching* (monitoreo de archivos), es decir, deben tener un mecanismo de *hot-reload* (un hilo de ejecución o un cron interno que re-lee el archivo del disco, que en este ejemplo simulamos mediante un ciclo `while` infinito).
+
+En caso de que no se creen los secretos de kubernetes y que el pod no se despliegue correctamente, podemos hacer trobleshooting usando los siguientes comandos:
+
+```sh
+# Validamos si se pudieron crear los SecretStores que realizan la autenticación
+kubectl get secretstores -n playground -o wide
+# Debe quedar en estado Valid con capabilities ReadWrite y Ready=True
+
+# En caso de que el anterior comando nos muestre por ejemplo un status InvalidProviderConfig, podemos
+# diagnosticar problemas al momento de crear el SecretStore (mirar los eventos al final del describe):
+kubectl describe secretstore vault-auth-eljavatar-k8s-kv-v2-demo -n playground
+kubectl describe secretstore vault-auth-eljavatar-k8s-kv-v2-playground -n playground
+
+# Validamos si se pudieron crear los ExternalSecrets que obtienen los secretos
+kubectl get externalsecrets -n playground -o wide
+# Debe quedar en Status SecretSynced y Ready=True
+
+# También podemos mirar los logs del operador de ESO para encontrar la causa del error:
+kubectl logs -n external-secrets -l app.kubernetes.io/name=external-secrets
+```
+
+
+### Obtener Secretos con VSO
+
+Para esta prueba, nos aseguramos que no exista el namespace `playground`, para lo cual ejecutamos primero `kubectl delete ns plaground`.
+
+No es necesario tener que levantar una aplicación para probar que los operadores (tanto ESO como VSO) pueden descargar secretos. En este caso vamos a realizar una prueba aplicando manifiestos que solamente crean los recursos de VSO necesarios para generar un Secret de Kubernetes. Para esto, ejecutamos los siguientes comandos:
+
+
+```sh
+# Creamos el namespace
+kubectl create ns playground
+
+# Creamos los recursos VaultAuth que se encargan de la autenticación:
+kubectl apply -f tests/vso-auth.yaml
+# Validamos que se creen correctamente:
+kubectl get vaultauths -n playground -o wide # Debe quedar en HEALTHY=True y READY=True
+# Si hay algún error, puede que se demore un poco en actualizar el estado
+
+# Creamos los recursos VaultStaticSecret que se encargan de obtener los secretos:
+kubectl apply -f tests/vso-secret.yaml
+# Validamos que se creen correctamente:
+kubectl get vaultstaticsecrets -n playground -o wide # Debe quedar en HEALTHY=True y READY=True
+
+# Validamos que los Secret de kubernetes se crean correctamente:
+kubectl get secrets -n playground -o wide
+
+# Podemos validar los datos con los que se crearon estos secretos:
+kubectl get secret -n playground playground-nginx-secret -o jsonpath='{.data.NGINX_USERNAME}' | base64 --decode; echo
+kubectl get secret -n playground playground-nginx-secret -o jsonpath='{.data.NGINX_PASSWORD}' | base64 --decode; echo
+kubectl get secret -n playground playground-nginx-secret -o jsonpath='{.data._raw}' | base64 --decode; echo
+
+kubectl get secret -n playground demo-secret -o jsonpath='{.data.TEST_USERNAME}' | base64 --decode; echo
+kubectl get secret -n playground demo-secret -o jsonpath='{.data.TEST_PASSWORD}' | base64 --decode; echo
+kubectl get secret -n playground demo-secret -o jsonpath='{.data._raw}' | base64 --decode; echo
+
+# Al finalizar la prueba, podríamos simplemente eliminar el namespace:
+kubectl delete ns playground
+```
+
+El `VaultSecertStatic` que obtiene el secreto de `/playground/nginx-app` lo configuramos para que valide secretos cada 2 minutos, por tanto, si por ejemplo ejecutamos ahora `vault kv put secret/eljavatar_k8s/kv-v2/playground/nginx-app NGINX_USERNAME=nginx_user NGINX_PASSWORD=nginx789`, al validar después de un par de minutos el valor de `NGINX_PASSWORD` en el Secret `playground-nginx-secret` veremos que su valor ha cambiado.
+
+En caso de que obtengamos errores al ejecutar los pasos anteriores que no permitan la creación de los secretos de Kubernetes, podemos hacer trobleshooting usando los siguientes comandos:
+
+```sh
+
+# Vemos los eventos asociados a los VaultAuth
+kubectl events --types=Warning -n playground --for vaultauths.secrets.hashicorp.com/vault-auth-playground -o json
+kubectl events --types=Warning -n playground --for vaultauths.secrets.hashicorp.com/vault-auth-demo -o json
+
+# También podemos mirar los logs del operador de VSO para encontrar la causa del error:
+kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-controller-manager -f --tail=100
+```
 
 

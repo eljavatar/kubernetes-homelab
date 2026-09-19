@@ -14,11 +14,21 @@ locals {
     talos_install_image = "factory.talos.dev/nocloud-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.13.4"
     talos_local_iso     = "local:iso/talos-nocloud-amd64-with-qemu.iso"
 
-    KUBECONFIG = "./talos/kubeconfig"
-
     # --- Red ---
     network_gateway  = "192.168.0.1"
     network_cidr     = "/24"
+
+    # En Terraform, la interpolación ${path.module} hace referencia al directorio donde reside el archivo .tf que la invoca.
+    # Por tanto, sería útil si necesitamos acceder a archivos dentro de la carpeta 'terraform/'
+    # Sin embargo, 'k8s/' y 'talos/' no están dentro de 'terraform/', por lo tanto, usamos path.root combinado con una salida
+    # al directorio superior (../)
+    # ${path.root} apunta al directorio del módulo raíz (la carpeta terraform/ donde se ejecuta el comando).
+    # Usar ../ nos permite "subir" un nivel al directorio principal del repositorio (kubernetes-homelab/) y
+    # de ahí acceder de forma segura a cualquier otro folder.
+    k8s_path = "${path.root}/../k8s"
+    talos_path = "${path.root}/../talos"
+
+    KUBECONFIG = "${local.talos_path}/kubeconfig"
 
     vms = {
         # -------------------------------------------------------------------
@@ -42,8 +52,8 @@ locals {
             run_on_ssd  = true
         }
         # Talos Control Plane 02
-        "cp-02" = {
-            vm_id       = 102
+        "cp-03" = {
+            vm_id       = 103
             node        = "pmx-01"
             tags        = ["k8s", "control-plane"]
             cores       = 2
@@ -53,8 +63,8 @@ locals {
             node_type   = "controlplane"
             zone        = "pmx-01"
             role        = "cp"
-            ip          = "192.168.0.32"
-            mac_address = "52:54:01:aa:aa:02"
+            ip          = "192.168.0.33"
+            mac_address = "52:54:01:aa:aa:03"
             run_on_ssd  = true
         }
         # Talos Worker Data 01 (Postgres, Mongo, SeaweedFS Master, Redis)
@@ -64,7 +74,7 @@ locals {
             tags        = ["k8s", "worker", "data"]
             cores       = 4
             memory      = 10240 # 10 GB RAM
-            disk_size   = 300 # 300 GB
+            disk_size   = 400 # 400 GB
             is_cp       = false
             node_type   = "worker"
             zone        = "pmx-01"
@@ -95,8 +105,8 @@ locals {
         # -------------------------------------------------------------------
 
         # Talos Control Plane 03
-        "cp-03" = {
-            vm_id       = 103
+        "cp-02" = {
+            vm_id       = 102
             node        = "pmx-02"
             tags        = ["k8s", "control-plane"]
             cores       = 2
@@ -106,8 +116,8 @@ locals {
             node_type   = "controlplane"
             zone        = "pmx-02"
             role        = "cp"
-            ip          = "192.168.0.33"
-            mac_address = "52:54:02:aa:aa:03"
+            ip          = "192.168.0.32"
+            mac_address = "52:54:02:aa:aa:02"
             run_on_ssd  = true
         }
         # Talos Worker Heavy 02 (Apache Pulsar, ScyllaDB)
@@ -133,7 +143,7 @@ locals {
             tags        = ["k8s", "worker", "ops"]
             cores       = 6
             memory      = 11264 # 11 GB RAM
-            disk_size   = 300 # 300 GB
+            disk_size   = 400 # 400 GB
             is_cp       = false
             node_type   = "worker"
             zone        = "pmx-02"
@@ -149,7 +159,7 @@ locals {
     vms_pmx02 = { for k, v in local.vms : k => v if v.node == "pmx-02" }
 
     gateway_api_urls = {
-        standard     = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml"
-        experimental = "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.4.1/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
+        standard     = var.use_local_iso ? "${local.k8s_path}/gateway-api-crds/v1.4.1/standard-install.yaml" : "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml"
+        experimental = var.use_local_iso ? "${local.k8s_path}/gateway-api-crds/v1.4.1/experimental/io_tlsroutes.yaml" : "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.4.1/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
     }
 }

@@ -1,6 +1,6 @@
 machine:
   nodeLabels:
-    topology.kubernetes.io/zone: "pmx-01"
+    topology.kubernetes.io/zone: "pmx-02"
     custom-role: cp
   network:
     interfaces:

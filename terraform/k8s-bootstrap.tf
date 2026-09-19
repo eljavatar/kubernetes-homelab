@@ -1,204 +1,8 @@
-### INI: Código para Levantar VMs con Talos configuradas desde el arranque y Bootstrap automático
-
-# Generar los secretos del cluster (CA, tokens, etc.) (solo se hace una vez para todo el cluster)
-resource "talos_machine_secrets" "this" {}
-
-
-# -------------------------------------------------------------------
-# MINI PC 1 (pmx-01) - Control Planes 1 y 2, Workers: Data y Apps
-# -------------------------------------------------------------------
-module "talos_pmx01" {
-  source = "./modules/talos-node"
-  providers = {
-    proxmox = proxmox.pmx01
-  }
-  node_name            = "pmx-01"
-  node_ip              = "192.168.0.10"
-  vms                  = local.vms_pmx01
-  use_local_iso        = var.use_local_iso
-  is_development       = var.is_development
-  cluster_name         = local.cluster_name
-  cluster_vip          = local.cluster_vip
-  cluster_endpoint     = local.cluster_endpoint
-  iso_url              = local.talos_iso_url
-  iso_name             = local.talos_iso_name
-  install_image        = local.talos_install_image
-  local_iso            = local.talos_local_iso
-  network_cidr         = local.network_cidr
-  network_gateway      = local.network_gateway
-  machine_secrets      = talos_machine_secrets.this.machine_secrets
-  client_configuration = talos_machine_secrets.this.client_configuration
-}
-
-# -------------------------------------------------------------------
-# MINI PC 2 (pmx-02) - Control Plane 3, Workers: Heavy y Ops
-# -------------------------------------------------------------------
-module "talos_pmx02" {
-  source = "./modules/talos-node"
-  providers = {
-    proxmox = proxmox.pmx02
-  }
-  node_name            = "pmx-02"
-  node_ip              = "192.168.0.11"
-  vms                  = local.vms_pmx02
-  use_local_iso        = var.use_local_iso
-  is_development       = var.is_development
-  cluster_name         = local.cluster_name
-  cluster_vip          = local.cluster_vip
-  cluster_endpoint     = local.cluster_endpoint
-  iso_url              = local.talos_iso_url
-  iso_name             = local.talos_iso_name
-  install_image        = local.talos_install_image
-  local_iso            = local.talos_local_iso
-  network_cidr         = local.network_cidr
-  network_gateway      = local.network_gateway
-  machine_secrets      = talos_machine_secrets.this.machine_secrets
-  client_configuration = talos_machine_secrets.this.client_configuration
-}
-
-
-# --- BOOTSTRAP Y ARCHIVOS DE ACCESO ---
-
-resource "time_sleep" "wait_for_cp_talos" {
-  # Depende directamente de que la VM del Control Plane principal esté creada y encendida
-  #depends_on = [proxmox_virtual_environment_vm.talos_pmx01]
-  depends_on = [module.talos_pmx01, module.talos_pmx02]
-  create_duration = "150s" # En caso de ser necesario, aumentar este valor a 180 ó más segundos
-}
-
-# Indica a Terraform que ejecute el 'bootstrap' en el CP principal
-resource "talos_machine_bootstrap" "this" {
-  # Asegura que primero se haya encendido la VM del Control Plane principal
-  # depends_on           = [talos_machine_configuration_apply.this]
-  depends_on           = [time_sleep.wait_for_cp_talos]
-  client_configuration = talos_machine_secrets.this.client_configuration
-  # En el bootstrap no usamos la vip del cluster, ya que en este punto, los servicios internos de Talos no han
-  # inicializado la IP Virtual, y por tanto debemos apuntar obligatoriamente a la IP física real del nodo que
-  # elegimos como primer Control Plane
-  node                 = local.primary_cp_ip # La IP del Control Plane inicial
-}
-
-# No usamos vamos a usar el talos_cluster_health ya que al desactivar el CNI por defecto (puesto que después
-# configuraremos Cilium), el health no pasará y se quedará esperando indefinidamente hasta que venza el timeout.
-# En caso de usar el CNI por defecto (Flannel), si podríamos habilitar la ejecución del health.
-# # Equivalente al comando manual 'talosctl health', bloqueando la ejecución de Terraform hasta que todos
-# # los componentes críticos del clúster (etcd, apiserver, kubelet, etc.) reporten un estado saludable
-# # Al ver los logs en la Consola de la VM del control plane principal, es posible que se vean errores,
-# # sin embargo, al finalizar aparecerá un mensaje que dice: '[talos] machine is running and ready'
-# data "talos_cluster_health" "boostrap_health" {
-#   # Forzamos a que espere a que termine el bootstrap obligatoriamente
-#   depends_on = [talos_machine_bootstrap.this]
-#   client_configuration = talos_machine_secrets.this.client_configuration
-  
-#   # Especificamos qué nodos queremos auditar (Típicamente los Control Planes)
-#   endpoints           = [local.primary_cp_ip]
-#   control_plane_nodes = [for k, v in local.vms : v.ip if v.is_cp]
-#   worker_nodes        = [for k, v in local.vms : v.ip if !v.is_cp]
-
-#   # Configuración de tiempos de espera para que Terraform no tire un timeout prematuro
-#   timeouts = {
-#     read = "10m" # Le da hasta 5 minutos al clúster para consolidarse y pasar los checks
-#   }
-# }
-
-# Esperamos unos segundos después del boostrap para generar el kubeconfig
-resource "time_sleep" "wait_after_boostrap" {
-  depends_on = [talos_machine_bootstrap.this]
-  create_duration = "10s"
-}
-
-# Recupera el kubeconfig de manera segura
-resource "talos_cluster_kubeconfig" "this" {
-  # Dependemos del boostrap, no del Health Check, ya que al desactivar el CNI por defecto (cni: name: none),
-  # los nodos del clúster entrarán en estado NotReady.
-  # Kubernetes necesita un CNI para asignar IPs a los pods y levantar componentes críticos como coredns.
-  # Como coredns se quedará en estado Pending, el plano de control nunca se considerará completamente
-  # "saludable" y talos_cluster_health se quedará esperando eternamente hasta lanzar un error por timeout.
-  # Es por esa razón que no dependemos del Health aquí, ya que necesitamos el kubeconfig para instalar
-  # el CNI vía Helm
-  depends_on           = [time_sleep.wait_after_boostrap]
-  client_configuration = talos_machine_secrets.this.client_configuration
-  # node                 = local.primary_cp_ip
-  node                 = local.cluster_vip
-}
-
-# Guarda el archivo kubeconfig en el entorno local para usarlo con kubectl
-resource "local_file" "kubeconfig" {
-  content  = resource.talos_cluster_kubeconfig.this.kubeconfig_raw
-  filename = "${path.module}/talos/kubeconfig"
-}
-
-
-# Extraer el archivo talosconfig generado por el provider
-data "talos_client_configuration" "this" {
-  cluster_name         = local.cluster_name
-  client_configuration = talos_machine_secrets.this.client_configuration
-  #endpoints            = [local.primary_cp_ip] # La IP del Control Plane principal
-  # El endpoint es la dirección a la que el cliente talosctl envía las peticiones de la API. Si configuramos
-  # aquí la IP Virtual (192.168.0.25), garantizamos que siempre podremos administrar la API de Talos (revisar
-  # logs, reiniciar servicios del OS, etc.) incluso si el nodo cp-01 se apaga físicamente en Proxmox.
-  endpoints            = [local.cluster_vip] # La IP del Virtual del clúster
-  # El parámetro node le indica a talosctl la máquina física/virtual específica a la que le queremos mandar
-  # un comando de bajo nivel (como un reboot o un desensamblado de discos). Si ponemos la VIP ahí, estaríamos
-  # apuntando a un nodo flotante impredecible. Para operaciones de mantenimiento con talosctl, debemos
-  # especificar la IP física real del nodo en cuestión o pasarla directamente en el comando usando el
-  # flag -n 192.168.0.31 (o la IP de cualquier otro nodo).
-  nodes                = [local.primary_cp_ip] # NO debe usar la VIP
-}
-
-# Escribir físicamente el archivo talosconfig en la carpeta './talos/'
-resource "local_file" "talosconfig" {
-  content  = data.talos_client_configuration.this.talos_config
-  filename = "${path.module}/talos/talosconfig"
-}
-
-
-# --- EXTRACCIÓN DE CONFIGURACIONES BASE (CONTROLPLANE Y WORKER) ---
-# El archivo controlplane.yaml generado aquí equivale exactamente al que se obtiene con 'talosctl gen config'.
-# Sin embargo, los parches de red (IP fija, Gateway y Hostname) se aplican dinámicamente en vivo a través del
-# recurso talos_machine_configuration_apply.
-# Por lo tanto, los archivos extraídos en la carpeta ./talos/ serán las plantillas base del cluster listas para
-# ser usadas con cualquier nodo de su tipo respectivo.
-
-# Forzamos la generación de una config base limpia para Controlplane y Worker
-data "talos_machine_configuration" "base_controlplane" {
-  cluster_name     = local.cluster_name
-  cluster_endpoint = local.cluster_endpoint
-  machine_type     = "controlplane"
-  machine_secrets  = talos_machine_secrets.this.machine_secrets
-  talos_version    = local.talos_version
-}
-
-data "talos_machine_configuration" "base_worker" {
-  cluster_name     = local.cluster_name
-  cluster_endpoint = local.cluster_endpoint
-  machine_type     = "worker"
-  machine_secrets  = talos_machine_secrets.this.machine_secrets
-  talos_version    = local.talos_version
-}
-
-# Guardamos el archivo controlplane.yaml base
-resource "local_file" "controlplane_yaml" {
-  #content  = values(data.talos_machine_configuration.this)[0].machine_configuration
-  content  = data.talos_machine_configuration.base_controlplane.machine_configuration
-  filename = "${path.module}/talos/controlplane.yaml"
-}
-
-# Guardamos el archivo worker.yaml base
-resource "local_file" "worker_yaml" {
-  content  = data.talos_machine_configuration.base_worker.machine_configuration
-  filename = "${path.module}/talos/worker.yaml"
-}
-
-### END: Código para Levantar VMs con Talos configuradas desde el arranque y Bootstrap automático
-
-
-
 ### INI: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento)
 
 # Configuramos el Provider de Helm usando los datos en memoria
 # Como usamos talos_cluster_kubeconfig.this, este provider se configurará después
-# de generarse el archivo kubeconfig
+# de generarse el archivo kubeconfig (por eso no necesitamos 'depends_on' aquí)
 provider "helm" {
   kubernetes = {
     host                   = talos_cluster_kubeconfig.this.kubernetes_client_configuration.host
@@ -232,9 +36,7 @@ provider "kubectl" {
 
 
 
-
-
-
+# YA NO NECESITAMOS APROBAR "MANUALMENTE" LOS CERTIFICADOS PORQUE VAMOS A INSTALAR kubelet-csr-approver
 # resource "terraform_data" "approve_csrs_1" {
 #   count = var.auto_config_cluster ? 1 : 0
 #   # Con el 'always_run', se fuerza la recreación destructiva, es decir, Terraform destruirá y volverá a crear
@@ -320,7 +122,7 @@ resource "helm_release" "kubelet_csr_approver" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/kubelet-csr-approver-values.yaml")
+    file("${local.k8s_path}/deployments/kubelet-csr-approver-values.yaml")
   ]
 
   # depends_on = [terraform_data.approve_csrs_1]
@@ -328,13 +130,13 @@ resource "helm_release" "kubelet_csr_approver" {
 }
 
 
+# YA NO NECESITAMOS RE-APROBAR "MANUALMENTE" LOS CERTIFICADOS PORQUE YA INSTALAMOS kubelet-csr-approver
 # resource "time_sleep" "wait_after_install_kubelet_csr_approver" {
 #   count = var.auto_config_cluster ? 1 : 0
 
 #   depends_on = [helm_release.kubelet_csr_approver]
 #   create_duration = "90s"
 # }
-
 
 # # Cuando se crea el clúster, a veces suelen crearsen nuevos certificados en medio, así que esperamos
 # # un minuto después de instalar kubelet-csr-approver y volvemos a approbar los certificados
@@ -371,7 +173,7 @@ resource "helm_release" "cilium" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/cilium-values.yaml")
+    file("${local.k8s_path}/deployments/cilium-values.yaml")
   ]
 
   # depends_on = [terraform_data.approve_csrs_2]
@@ -399,7 +201,7 @@ resource "helm_release" "coredns" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/coredns-values.yaml")
+    file("${local.k8s_path}/deployments/coredns-values.yaml")
   ]
 
   # Obligamos a que Cilium se aplique primero
@@ -410,10 +212,10 @@ resource "helm_release" "coredns" {
 # Validación final de Hubble Relay.
 # Como todos los pods de CoreDNS ya están Running (gracias al paso anterior), Hubble Relay se recuperará solo.
 # Este bloque garantiza que todo esté al 100% antes de los siguientes pasos de Terraform.
-# Esto reinicio lo hacemos debido a que el hubble-relay de Cilium necesita que CoreDNS esté corriendo y con
+# Este reinicio lo hacemos debido a que el hubble-relay de Cilium necesita que CoreDNS esté corriendo y con
 # las configuraciones correctas. Por tanto, al reiniciar hubble-relay después de que CoreDNS ya esté Running
 # garantizamos que este pod también quede en estado Running.
-resource "terraform_data" "wait_for_hubble" {
+resource "terraform_data" "wait_for_cilium_hubble" {
   count = var.auto_config_cluster ? 1 : 0
 
   provisioner "local-exec" {
@@ -433,15 +235,15 @@ resource "terraform_data" "wait_for_hubble" {
 # Configuración del Pool de IPs (Cilium)
 resource "kubectl_manifest" "cilium_ip_pool" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/cilium-ip-pool.yaml")
-  depends_on = [terraform_data.wait_for_hubble]
+  yaml_body  = file("${local.k8s_path}/cilium-ip-pool.yaml")
+  depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
 # Configuración del L2 Advertisement (Cilium)
 resource "kubectl_manifest" "cilium_l2_policy" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/cilium-l2-policy.yaml")
-  depends_on = [terraform_data.wait_for_hubble]
+  yaml_body  = file("${local.k8s_path}/cilium-l2-policy.yaml")
+  depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
 
@@ -459,7 +261,7 @@ resource "helm_release" "cert_manager" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/cert-manager-values.yaml")
+    file("${local.k8s_path}/deployments/cert-manager-values.yaml")
   ]
 
   # set {
@@ -483,7 +285,7 @@ resource "helm_release" "trust_manager" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/trust-manager-values.yaml")
+    file("${local.k8s_path}/deployments/trust-manager-values.yaml")
   ]
 
   depends_on = [helm_release.cert_manager]
@@ -497,13 +299,13 @@ resource "helm_release" "trust_manager" {
 # lo contrario, el for_each de kubectl_manifest.internal_ca no podrá planificarse
 data "kubectl_file_documents" "docs_internal_ca" {
   #count      = var.auto_config_cluster ? 1 : 0
-  content    = file("${path.module}/k8s/internal-ca.yaml")
+  content    = file("${local.k8s_path}/internal-ca.yaml")
   #depends_on = [helm_release.cert_manager]
 }
 
-# # Alternativa: Usar la función manifest_decode_multi
+# # Alternativa a kubectl_file_documents: Usar la función manifest_decode_multi
 # output "example_output" {
-#   value = provider::kubernetes::manifest_decode_multi(file("${path.module}/k8s/internal-ca.yaml"))
+#   value = provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/internal-ca.yaml"))
 # }
 
 resource "kubectl_manifest" "internal_ca" {
@@ -518,26 +320,32 @@ resource "kubectl_manifest" "internal_ca" {
   # - Esto quiere decir, que un 'for_each' en un bloque que usa un 'count' tiene que saber a qué elemento
   #   de esa lista de ejecuciones (determinadas por el count) corresponde un determinado recurso, que en
   #   caso de count=1 es la ejecución con índice 0, y por tanto, es al recurso de ese elemento que debemos
-  #   acceder data.kubectl_file_documents.docs_internal_ca[0].manifests que sería similar a tener algo como
-  #   data.kubectl_file_documents.docs_internal_ca[count - 1].manifests.
+  #   acceder: 'data.kubectl_file_documents.docs_internal_ca[0].manifests', que sería similar a tener algo
+  #   como 'data.kubectl_file_documents.docs_internal_ca[count - 1].manifests'.
   #
   # Por otro lado, el valor que se utiliza en el metaargumento for_each de Terraform debe conocerse por
   # completo durante la fase de planificación (terraform plan) antes de ejecutar los cambios. No puede
   # depender de atributos calculados o generados durante la aplicación (known after apply).
   #
   # Entonces, cuando count=1, significa que hay un bloque a ejecutar, y por tanto podemos obtener el valor
-  # de data.kubectl_file_documents.docs_internal_ca[0].manifests, pero si count=0, no hay ningún bloque
-  # a ejecutar (es como si tuviéramos data.kubectl_file_documents.docs_internal_ca[null].manifests), y por
-  # ende no se podría planificar el contenido que ejecutaría el for_each.
+  # de 'data.kubectl_file_documents.docs_internal_ca[0].manifests', pero si count=0, no hay ningún bloque
+  # a ejecutar (es como si tuviéramos 'data.kubectl_file_documents.docs_internal_ca[null].manifests)', y
+  # por ende no se podría planificar el contenido que ejecutaría el for_each.
+  #
+  # Por esa razón, la validación de si debemos ejecutar o no este bloque, no la hacemos con un count
+  # sino que la hacemos con el operadore ternario (?:); incluso, al tener este operador tenrnario, si
+  # intentamos agregar el 'count', terraform nos responderá con este mensaje de error: 'The "count"
+  # and "for_each" meta-arguments are mutually-exclusive, only one should be used to be explicit about
+  # the number of resources to be created'
   for_each  = var.auto_config_cluster ? data.kubectl_file_documents.docs_internal_ca.manifests : {}
   yaml_body = each.value
   depends_on = [helm_release.cert_manager, data.kubectl_file_documents.docs_internal_ca]
 }
 
-# No usamos kubernetes_manifest poruq eno admite multidocumento
+# No usamos kubernetes_manifest para esto, porque no admite multidocumento
 # resource "kubernetes_manifest" "internal_ca" {
 #   manifest = yamldecode(
-#     templatefile("${path.module}/k8s/internal-ca.yaml", {
+#     templatefile("${local.k8s_path}/internal-ca.yaml", {
 #       domain_name = var.domain_name
 #     })
 #   )
@@ -549,7 +357,7 @@ resource "kubectl_manifest" "internal_ca" {
 # Creamos el Trust Bundle
 resource "kubectl_manifest" "trust_bundle" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/trust-bundle.yaml")
+  yaml_body  = file("${local.k8s_path}/trust-bundle.yaml")
   depends_on = [helm_release.trust_manager]
 }
 
@@ -580,7 +388,7 @@ resource "kubectl_manifest" "letsencrypt_stage_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${path.module}/k8s/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -595,7 +403,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${path.module}/k8s/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -610,7 +418,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
 # Creamos el Namespace gateway-api-system
 resource "kubectl_manifest" "namespace_gateway_api_system" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/gateway-api-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/gateway-api-namespace.yaml")
   depends_on = [kubectl_manifest.letsencrypt_stage_cluster_issuer, kubectl_manifest.letsencrypt_prod_cluster_issuer]
 }
 
@@ -621,7 +429,7 @@ resource "kubectl_manifest" "namespace_gateway_api_system" {
 # Local
 resource "kubectl_manifest" "cert_gateway_local" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/cert-gateway-local.yaml")
+  yaml_body  = file("${local.k8s_path}/cert-gateway-local.yaml")
   depends_on = [kubectl_manifest.namespace_gateway_api_system]
 }
 
@@ -631,7 +439,7 @@ resource "kubectl_manifest" "cert_letsencrypt_public" {
 
   # Lee el archivo y reemplaza la cadena según el valor de var.use_letsencrypt_prod
   yaml_body = replace(
-    file("${path.module}/k8s/cert-letsencrypt-public.yaml"),
+    file("${local.k8s_path}/cert-letsencrypt-public.yaml"),
     "name: letsencrypt-stage-issuer",
     "name: ${var.use_letsencrypt_prod ? "letsencrypt-prod-issuer" : "letsencrypt-stage-issuer"}"
   )
@@ -646,7 +454,7 @@ resource "kubectl_manifest" "external_gateway" {
   count = var.auto_config_cluster ? 1 : 0
   
   yaml_body = templatefile(
-    "${path.module}/k8s/templates/gateway-api-external.yaml.tpl",
+    "${local.k8s_path}/templates/gateway-api-external.yaml.tpl",
     {
       USE_PROD_DOMAIN = var.use_prod_domain
     }
@@ -660,7 +468,7 @@ resource "kubectl_manifest" "external_gateway" {
 # Creamos el redireccionador http global para que redireccione a https
 resource "kubectl_manifest" "global_http_redirect" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/global-http-redirect.yaml")
+  yaml_body  = file("${local.k8s_path}/global-http-redirect.yaml")
   depends_on = [kubectl_manifest.external_gateway]
 }
 
@@ -670,23 +478,9 @@ resource "kubectl_manifest" "global_http_redirect" {
 # 1. Creamos el namespace cloudflare-tunnel-system
 resource "kubectl_manifest" "namespace_cloudflare_tunnel_system" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/deployments/cloudflare-tunnel/namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/deployments/cloudflare-tunnel/namespace.yaml")
   depends_on = [kubectl_manifest.global_http_redirect]
 }
-
-# 1. Creamos el secreto con el token del túnel de Cloudflare
-# resource "kubectl_manifest" "cloudflare_tunnel_token_secret" {
-#   count = var.auto_config_cluster ? 1 : 0
-  
-#   yaml_body = templatefile(
-#     "${path.module}/k8s/templates/gateway-api-external.yaml.tpl",
-#     {
-#       USE_PROD_DOMAIN = var.use_prod_domain
-#     }
-#   )
-  
-#   depends_on = [kubectl_manifest.cert_gateway_local]
-# }
 
 # 2. Creamos el Secret para el Token del túnel de Cloudflare
 resource "kubernetes_secret_v1" "cloudflare_tunnel_token_secret" {
@@ -708,7 +502,7 @@ resource "kubernetes_secret_v1" "cloudflare_tunnel_token_secret" {
 # 3. Levantamos el agente de cloudflared
 resource "kubectl_manifest" "cloudflared_agent" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
-  yaml_body  = file("${path.module}/k8s/deployments/cloudflare-tunnel/deployment.yaml")
+  yaml_body  = file("${local.k8s_path}/deployments/cloudflare-tunnel/deployment.yaml")
   depends_on = [kubernetes_secret_v1.cloudflare_tunnel_token_secret]
 }
 
@@ -728,7 +522,7 @@ resource "helm_release" "openebs" {
 
   # Carga el archivo de valores externo
   values = [
-    file("${path.module}/k8s/deployments/openebs-values.yaml")
+    file("${local.k8s_path}/deployments/openebs-values.yaml")
   ]
 
   depends_on = [kubectl_manifest.cloudflared_agent]
@@ -736,119 +530,303 @@ resource "helm_release" "openebs" {
 
 
 
-# # Instalación de Descheduler
-# resource "helm_release" "descheduler" {
-#   count            = var.auto_config_cluster ? 1 : 0
 
-#   name             = "descheduler"
-#   repository       = "https://kubernetes-sigs.github.io/descheduler/"
-#   chart            = "descheduler"
-#   version          = "0.36.0"
-#   namespace        = "kube-system"
-#   create_namespace = false
+# Configuración del TokenReviewer para Vault
+# 1. Creamos el namespace external_auth
+resource "kubectl_manifest" "namespace_external_auth" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/external-auth-namespace.yaml")
+  depends_on = [helm_release.openebs]
+}
 
-#   # Carga el archivo de valores externo
-#   values = [
-#     file("${path.module}/k8s/deployments/descheduler-values.yaml")
-#   ]
-
-#   depends_on = [kubectl_manifest.openebs]
+# El resource kubernetes_manifest está diseñado no solo para manejar YAMLs genéricos, sino también CRDS,
+# por lo tanto fuerza al proveedor a iniciar un cliente REST para consultar al clúster durante el plan.
+# Por esa razón, no puede usarse en el mismo plan donde se hace el bootstrap del clúster (con Talos), ya
+# que en esta instancia aún no hay un clúster de kubernetes existente.
+# resource "kubernetes_manifest" "vault_token_reviewer" {
+#   for_each = { for manifest in provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/vault-token-reviewer-setup.yaml")) : "${lower(manifest.kind)}-${manifest.metadata.name}" => manifest }
+#   manifest = each.value
+#   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
 
-
-
-
-# # Instalación de Metrics Server
-# resource "helm_release" "metrics_server" {
-#   count            = var.auto_config_cluster ? 1 : 0
-
-#   name             = "metrics-server"
-#   repository       = "https://kubernetes-sigs.github.io/metrics-server/"
-#   chart            = "metrics-server"
-#   version          = "3.13.1"
-#   namespace        = "kube-system"
-#   create_namespace = false
-
-#   # Carga el archivo de valores externo
-#   values = [
-#     file("${path.module}/k8s/deployments/metrics-server-values.yaml")
-#   ]
-
-#   depends_on = [kubectl_manifest.descheduler]
+# Esta es otra alternativa
+# variable "empty_string_set" {
+#   type    = set(string)
+#   default = []
+# }
+# resource "kubectl_manifest" "vault_token_reviewer" {
+#   for_each   = var.auto_config_cluster ? toset(split("---", file("${local.k8s_path}/vault-token-reviewer-setup.yaml"))) : var.empty_string_set
+#   yaml_body  = each.value
+#   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
 
+# 2. Aplicamos el manifiesto de configuración del TokenReviewer
+data "kubectl_file_documents" "files_vault_token_reviewer_setup" {
+  content    = file("${local.k8s_path}/tf-vault-token-reviewer-setup-without-secret.yaml")
+}
+
+resource "kubectl_manifest" "vault_token_reviewer_setup" {
+  for_each   = var.auto_config_cluster ? data.kubectl_file_documents.files_vault_token_reviewer_setup.manifests : {}
+  yaml_body  = each.value
+  depends_on = [kubectl_manifest.namespace_external_auth, data.kubectl_file_documents.files_vault_token_reviewer_setup]
+}
+
+# Debemos crear el Secreto por separado, ya que cuando se aplica un secreto con la anotación kubernetes.io/service-account.name,
+# como es el caso del TokenReviewer, la API de Kubernetes o un controlador interno modifica, vacía o muta el objeto de inmediato,
+# o en ocasiones lo rechaza/elimina si la ServiceAccount asociada no está completamente lista en el microsegundo en que se crea
+# el secreto. Al cambiar drásticamente el estado del recurso justo después de crearse, el proveedor de Terraform se confunde,
+# piensa que el objeto desapareció o mutó ilegalmente, y lanza un error.
+# Por eso gestionamos el Secret directamente con el proveedor oficial de Kubernetes de Terraform (hashicorp/kubernetes).
+# Este proveedor maneja mucho mejor el ciclo de vida y los reintentos de los tokens.
+# Este bloque creará el secreto de forma segura y esperará a que 
+# Kubernetes inyecte el token sin romper el estado de Terraform.
+resource "kubernetes_secret_v1" "vault_token_reviewer_secret" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  metadata {
+    name      = "vault-token-reviewer-secret"
+    namespace = "external-auth"
+    annotations = {
+      "kubernetes.io/service-account.name" = "vault-token-reviewer-sa"
+    }
+  }
+
+  type = "kubernetes.io/service-account-token"
+
+  # Espera a que el ServiceAccount sea creado por el loop de kubectl_manifest
+  depends_on = [kubectl_manifest.vault_token_reviewer_setup]
+}
 
 
 
 
+# Configuración del TokenReviewer en Vault
+# 1. Buscamos el método de autenticación ya existente
+data "vault_auth_backend" "eljavatar_k8s_kubernetes" {
+  count      = var.auto_config_cluster ? 1 : 0
+  path       = "eljavatar_k8s/kubernetes"
+  depends_on = [kubernetes_secret_v1.vault_token_reviewer_secret]
+}
 
-
-
-
-
-
-
-
-
-
-
-# resource "null_resource" "restart_coredns" {
-#   provisioner "local-exec" {
-#     command     = "kubectl rollout restart deployment coredns -n kube-system"
-#     interpreter = ["/bin/bash", "-c"]
-
-#     environment = {
-#       #KUBECONFIG = "./talos/kubeconfig"
-#       KUBECONFIG = local.KUBECONFIG
-#     }
-#   }
-
-#   depends_on = [kubernetes_config_map_v1_data.coredns_patch]
-# }
-
-
-
-
-
-# # Un namespace de aplicación normal en producción (No requiere privilegios de red ni root)
-# resource "kubernetes_namespace" "apps" {
+# Si queremos leer un Secreto ya existente.
+# En este caso no lo hacemos ya que creamos el recurso desde este mismo Script
+# data "kubernetes_secret_v1" "vault_token_reviewer" {
+#   count = var.auto_config_cluster ? 1 : 0
 #   metadata {
-#     name = "apps"
-#     # No necesitas agregar labels manualmente porque el comportamiento global ya es 'baseline'
+#     name      = "vault-token-reviewer-secret"
+#     namespace = "external-auth"
 #   }
+#   depends_on = [kubectl_manifest.vault_token_reviewer_setup]
 # }
 
-# # Un namespace especial (Ej: Si despliegas herramientas de monitoreo o storages pesados en 'infra')
-# resource "kubernetes_namespace" "infra" {
-#   metadata {
-#     name = "infra"
-    
-#     # Solo forzamos 'privileged' si el clúster dejó de estar en modo desarrollo.
-#     # Si var.is_development es true, no hace falta ponerlo porque el clúster ya regala privilegios globalmente.
-#     labels = var.is_development ? {} : {
-#       "pod-security.kubernetes.io/enforce" = "privileged"
-#     }
-#   }
-# }
-
-
-# # ALternativa por defecto?
-# # Este recurso modificará la configuración de admisión de Kubernetes EN CALIENTE
-# # mediante la API de Kubernetes una vez el clúster esté arriba.
-# resource "kubernetes_labels" "default_namespaces" {
-#   # Solo aplicamos cambios si is_development es FALSE (Producción)
-#   count       = var.is_development ? 0 : 1
-#   api_version = "v1"
-#   kind        = "Namespace"
+# 2. Escribimos la configuración en Vault (Equivalente al 'vault write auth/eljavatar_k8s/kubernetes/config')
+resource "vault_kubernetes_auth_backend_config" "eljavatar_k8s_config" {
+  count                = var.auto_config_cluster ? 1 : 0
+  backend              = data.vault_auth_backend.eljavatar_k8s_kubernetes[0].path # count.index
+  # backend              = "eljavatar_k8s/kubernetes"
+  kubernetes_host      = local.cluster_endpoint
   
-#   metadata {
-#     name = "default" # Protege el namespace default en producción
-#   }
+  # El proveedor de Kubernetes en Terraform ya decodifica el base64 automáticamente
+  kubernetes_ca_cert   = kubernetes_secret_v1.vault_token_reviewer_secret[0].data["ca.crt"]
+  token_reviewer_jwt   = kubernetes_secret_v1.vault_token_reviewer_secret[0].data["token"]
+  disable_local_ca_jwt = false # Opcional: por defecto según el caso de uso
 
-#   labels = {
-#     "pod-security.kubernetes.io/enforce" = "baseline"
-#   }
-# }
+  # Habilitar los metadatos de las anotaciones
+  use_annotations_as_alias_metadata = true
+
+  depends_on = [data.vault_auth_backend.eljavatar_k8s_kubernetes, kubernetes_secret_v1.vault_token_reviewer_secret]
+}
 
 
 
+
+# Configuración el CronJob que actualiza automáticamente en el clúster el certificado TLS del servidor de Vault
+# 1. Creamos los namespaces
+resource "kubectl_manifest" "namespace_ops_shared" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/shared-ops-namespace.yaml")
+  depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
+}
+
+resource "kubectl_manifest" "namespace_eso" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/eso-namespace.yaml")
+  depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
+}
+
+resource "kubectl_manifest" "namespace_vso" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/vso-namespace.yaml")
+  depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
+}
+
+# 2. Creamos los permisos mediante RBAC
+data "kubectl_file_documents" "files_vault_cert_syncer_rbac" {
+  content    = file("${local.k8s_path}/vault-cert-syncer-rbac.yaml")
+}
+
+resource "kubectl_manifest" "vault_cert_syncer_rbac" {
+  for_each   = var.auto_config_cluster ? data.kubectl_file_documents.files_vault_cert_syncer_rbac.manifests : {}
+  yaml_body  = each.value
+  depends_on = [
+    kubectl_manifest.namespace_ops_shared,
+    kubectl_manifest.namespace_eso,
+    kubectl_manifest.namespace_vso,
+    data.kubectl_file_documents.files_vault_cert_syncer_rbac
+  ]
+}
+
+# 3. Creamos el CronJob
+resource "kubectl_manifest" "vault_cert_syncer_cronjob" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/deployments/vault-cert-syncer-cronjob.yaml")
+  depends_on = [kubectl_manifest.vault_cert_syncer_rbac]
+}
+
+# 4. Hacemos una primera ejecución del Job
+# Las ejecuciones en terminal las usamos si no queremos que Terraform gestione el ciclo de
+# vida de un recurso, como lo es el caso de este Job que solo nos interesa que se ejecute
+# una vez cuando se hace el bootstrap del cluster
+resource "terraform_data" "first_sync_vault_cert_manual" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  # Re-ejecuta el comando si el CronJob cambia o se recrea
+  triggers_replace = {
+    cronjob_id = kubectl_manifest.vault_cert_syncer_cronjob[0].id
+  }
+
+  provisioner "local-exec" {
+    # Añadimos validación '--ignore-not-found' para evitar que falle si el Job ya existe
+    #command = "kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    command = "kubectl delete job first-sync-vault-cert-manual -n shared-ops --ignore-not-found && kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    interpreter = ["/bin/bash", "-c"]
+
+    environment = {
+      KUBECONFIG = local.KUBECONFIG
+    }
+  }
+
+  depends_on = [kubectl_manifest.vault_cert_syncer_cronjob]
+}
+
+
+
+
+# Instalación de ESO
+resource "helm_release" "eso" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "external-secrets"
+  repository       = "https://charts.external-secrets.io"
+  chart            = "external-secrets"
+  version          = "2.9.0"
+  namespace        = "external-secrets"
+  create_namespace = false
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/eso-values.yaml")
+  ]
+
+  depends_on = [terraform_data.first_sync_vault_cert_manual]
+}
+
+
+
+# Instalación y Configuración de VSO
+resource "helm_release" "vso" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "vault-secrets-operator"
+  repository       = "https://helm.releases.hashicorp.com"
+  chart            = "vault-secrets-operator"
+  version          = "1.5.1"
+  namespace        = "vault-secrets-operator"
+  create_namespace = false
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/vso-values.yaml")
+  ]
+
+  depends_on = [terraform_data.first_sync_vault_cert_manual]
+}
+
+# Configuración del VaultConnection (de VSO)
+resource "kubectl_manifest" "vso_vault_connection" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/vso-vault-connection.yaml")
+  depends_on = [helm_release.vso]
+}
+
+# Configuración del VaultAuthGlobal (de VSO)
+resource "kubectl_manifest" "vso_vault_auth_global" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/vso-vault-auth-global.yaml")
+  depends_on = [kubectl_manifest.vso_vault_connection]
+}
+
+
+
+# Instalación de Reloader
+resource "helm_release" "reloader" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "reloader"
+  repository       = "https://stakater.github.io/stakater-charts"
+  chart            = "reloader"
+  version          = "2.2.17"
+  namespace        = "reloader"
+  create_namespace = true
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/reloader-values.yaml")
+  ]
+
+  depends_on = [kubectl_manifest.vso_vault_auth_global]
+}
+
+
+
+# Instalación de Descheduler
+resource "helm_release" "descheduler" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "descheduler"
+  repository       = "https://kubernetes-sigs.github.io/descheduler/"
+  chart            = "descheduler"
+  version          = "0.36.0"
+  namespace        = "kube-system"
+  create_namespace = false
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/descheduler-values.yaml")
+  ]
+
+  depends_on = [helm_release.reloader]
+}
+
+
+
+# Instalación de Metrics Server
+resource "helm_release" "metrics_server" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "metrics-server"
+  repository       = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart            = "metrics-server"
+  version          = "3.13.1"
+  namespace        = "kube-system"
+  create_namespace = false
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/metrics-server-values.yaml")
+  ]
+
+  depends_on = [helm_release.descheduler]
+}
+
+### END: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento)

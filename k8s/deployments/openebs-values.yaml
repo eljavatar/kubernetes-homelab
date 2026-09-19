@@ -51,6 +51,8 @@ engines:
       enabled: false
     zfs:
       enabled: false
+    rawfile:
+      enabled: false
   replicated:
     # Deshabilitamos por completo Mayastor para evitar consumo de HugePages y CPU pollers
     mayastor:

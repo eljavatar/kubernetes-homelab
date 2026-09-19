@@ -1,0 +1,32 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuthGlobal
+metadata:
+  name: vault-auth-global-eljavatar-k8s
+  namespace: vault-secrets-operator
+# https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultauthglobalspec
+spec:
+  # El nombre de la conexión se puede indicar anteponiendo el nombre del namespace, como
+  # por ejemplo namespaceA/vaultConnectionRefB. Si no se le indica el namespace a través
+  # de este prefijo, lo buscará en el mismo namespace de este VaultAuthGlobal.
+  # En caso de que no especifique el valor de vaultConnectionRef, VSO buscará en el mismo
+  # namespace donde se instaló VSO un VaultAuthGlobal con nombre 'default'.
+  vaultConnectionRef: vault-secrets-operator/vault-connection
+  # Como es un recurso 'global' que el operador de VSO podría invocar desde cualquier
+  # namespace, podemos indicarle desde qué namespaces queremos permitir que se llame.
+  # Si no le especificamos nada, se deshabilitarán todos los namespaces, excepto donde
+  # está instalado el operador de VSO y el del VaultAuthMethod de referencia especificado
+  # en este mismo VaultAuthGlobal (por ejemplo, spec.kubernetes.namespace)
+  allowedNamespaces:
+    # En un entorno productivo, lo ideal sería especificar la lista de namespaces permitidos,
+    # sin embargo, en nuestro caso lo permitiremos para todos los namespaces
+    - "*"
+  defaultAuthMethod: kubernetes
+  # https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultauthglobalconfigkubernetes
+  kubernetes:
+    audiences:
+      - vault
+    # Mount to use when authenticating to auth method.
+    mount: eljavatar_k8s/kubernetes
+    role: global-dynamic-reading-role
+    serviceAccount: vault-vso-auth-sa # El namespace se obtiene de cada VaultAuth
+    tokenExpirationSeconds: 600

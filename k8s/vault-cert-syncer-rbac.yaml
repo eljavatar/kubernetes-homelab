@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-cert-syncer-sa
+  namespace: shared-ops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+# Definimos las reglas de manera global mediante un CluesterROle (en vez de Role)
+# ya que el script del CronJob accederá a recursos en otros namespaces
+kind: ClusterRole
+metadata:
+  name: vault-cert-syncer-cluster-role
+  namespace: shared-ops
+rules:
+  # Permisos para ConfigMaps (ESO)
+  # Regla 1: Permiso general para CREAR cualquier ConfigMap en este namespace
+  #          Se requiere sin 'resourceNames' para la primera vez que se crea el configmap
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  # Regla 2: Permisos de lectura y modificación restringidos ÚNICAMENTE al ConfigMap objetivo
+  #          Al tener 'resourceNames', el recurso ya debe existir
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["vault-ca-cert"] # Restringido SOLO a este ConfigMap
+    verbs: ["get", "list", "update", "patch"]
+  # Permisos para Secrets (VSO)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["vault-ca-cert"] # Restringido SOLO a este Secret
+    verbs: ["get", "list", "update", "patch"]
+  # Permisos para Deployments (Reinicios de ambos operadores)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["external-secrets", "vault-secrets-operator-controller-manager"]
+    # El operador 'rollout restart' requiere obligatoriamente 'update' y 'patch'
+    # Se agregan 'list' y 'watch' para que 'kubectl rollout status' funcione sin problemas
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+# En vez de crear un ClusterRoleBinding que le daría permisos al script del CronJob en
+# todos los namespaces del clúster de forma global, atamos la ServiceAccount central a
+# cada namespace de destino mediante el propio RoleBinding de cada namespace
+
+# Enlace para el Namespace de External Secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-cert-syncer-local-binding
+  namespace: external-secrets
+subjects:
+  - kind: ServiceAccount
+    name: vault-cert-syncer-sa
+    namespace: shared-ops # Apunta a la SA central
+roleRef:
+  kind: ClusterRole
+  name: vault-cert-syncer-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Enlace para el Namespace de Vault Secrets Operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-cert-syncer-local-binding
+  namespace: vault-secrets-operator
+subjects:
+  - kind: ServiceAccount
+    name: vault-cert-syncer-sa
+    namespace: shared-ops # Apunta a la SA central
+roleRef:
+  kind: ClusterRole
+  name: vault-cert-syncer-cluster-role
+  apiGroup: rbac.authorization.k8s.io

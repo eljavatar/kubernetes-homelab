@@ -1,50 +1,3 @@
-terraform {
-  required_providers {
-    proxmox = { source = "bpg/proxmox", version = "0.110.0" }
-    talos   = { source = "siderolabs/talos", version = "0.11.0" }
-    time    = { source = "hashicorp/time", version = "0.14.0" }
-    local   = { source = "hashicorp/local", version = ">= 2.0.0" }
-  }
-}
-
-variable "node_name" {}
-variable "node_ip" {}
-variable "vms" {
-  type = map(object({
-    vm_id        = number
-    cores        = number
-    memory       = number
-    disk_size    = string
-    ip           = string
-    mac_address  = string
-    is_cp        = bool
-    node_type    = string
-    zone         = string
-    role         = string
-    tags         = list(string)
-  }))
-}
-variable "use_local_iso" {}
-variable "is_development" {}
-variable "cluster_name" {}
-variable "cluster_vip" {}
-variable "cluster_endpoint" {}
-variable "iso_url" {}
-variable "iso_name" {}
-variable "install_image" {}
-variable "local_iso" {}
-variable "network_cidr" {}
-variable "network_gateway" {}
-variable "machine_secrets" {
-  type = any
-  sensitive = true
-}
-variable "client_configuration" {
-  type = any
-}
-
-
-
 # Descargar ISO oficial Nocloud de Talos directamente en Proxmox (una por nodo Proxmox)
 resource "proxmox_download_file" "talos_image" {
   count        = var.use_local_iso ? 0 : 1
@@ -134,7 +87,7 @@ data "talos_machine_configuration" "this" {
             # de servicio al iniciarse, y que la renueve antes de que caduque enviando otra
             serverTLSBootstrap = true
           }
-          # Asegura que Kubelet apunte al IP del servicio DNS
+          # Asegura que Kubelet apunte a la IP del servicio DNS
           # https://oneuptime.com/blog/post/2026-03-03-configure-coredns-custom-settings-on-talos-linux/view#applying-changes-through-talos-machine-config
           # https://oneuptime.com/blog/post/2026-03-03-troubleshoot-coredns-issues-on-talos-linux/view
           # https://docs.siderolabs.com/talos/v1.13/reference/configuration/v1alpha1/config#kubelet
@@ -341,7 +294,7 @@ resource "proxmox_virtual_environment_vm" "talos_vm" {
     # Los sistemas operativos modernos (incluyendo el Kernel de Talos) cambian sus algoritmos internos de entrada
     # y salida (I/O Schedulers) cuando saben que el medio es de estado sólido. Desactivan la optimización de
     # rotación de aguja (necesaria en HDDs) y habilitan el procesamiento en paralelo extremo.
-    ssd          = each.run_on_ssd  # RECOMENDADO: Informa a la VM que el medio físico subyacente es un NVMe/SSD
+    ssd          = each.value.run_on_ssd  # RECOMENDADO: Informa a la VM que el medio físico subyacente es un NVMe/SSD
   }
 
   # Lectora ISO (unidad de CD-ROM): Desde donde va a bootear la primera vez
@@ -403,205 +356,8 @@ resource "terraform_data" "boot_vm" {
 resource "local_file" "machine_configs" {
   for_each = var.vms
 
-  # Esto creará una estructura limpia: ./talos/configs/pmx-01/controlplane-vm01.yaml
-  filename = "${path.root}/talos/configs/${var.node_name}/${each.value.is_cp ? "controlplane" : "worker"}-${each.key}.yaml"
+  # Esto creará una estructura limpia: ./talos/configs/pmx-01/cp-01.yaml, etc.
+  filename = "${var.talos_path}/configs/${var.node_name}/${each.value.is_cp ? "controlplane" : "worker"}-${each.key}.yaml"
+
   content  = data.talos_machine_configuration.this[each.key].machine_configuration
 }
-
-
-
-# Una nota importante para el "Futuro" (Día 2)
-# 
-# En este caso, estamos usando talos_machine_configuration para generar la configuración de inicio de una
-# con la IP estática y hostname requerido, por lo que no necesitamos de talos_machine_configuration_apply.
-# 
-# ¿Cuándo sí volveríamos a necesitar talos_machine_configuration_apply?
-# 
-# Únicamente en el "Día 2" de las operaciones del clúster. Si dentro de 6 meses se requiere cambiar un
-# parámetro de Kubernetes, añadir un proxy, o cambiar una configuración del kernel de Talos sin destruir
-# la VM, el Snippet de Cloud-Init ya no servirá (porque Cloud-Init solo corre en el primer arranque).
-# 
-# En ese escenario futuro, se añadiría el talos_machine_configuration_apply apuntando a las IPs ya
-# existentes para actualizar los nodos en vivo.
-# 
-# Con esta configuración, evitamos tener que ejecutar patchs desde la terminal por cada VM:
-# resource "talos_machine_configuration_apply" "this" {
-#   for_each = local.vms
-
-#   client_configuration        = var.client_configuration
-#   machine_configuration_input = data.talos_machine_configuration.this[each.key].machine_configuration
-#   node                        = each.value.ip # IP temporal o final si Talos ya responde
-
-#   config_patches = [
-#     yamlencode({
-#       machine = {
-#         network = {
-#           interfaces = [
-#             {
-#               interface = "eth0"
-#               dhcp      = false
-#               addresses = ["${each.value.ip}${local.network_cidr}"]
-#               routes = [
-#                 {
-#                   network = "0.0.0.0/0"
-#                   gateway = local.network_gateway
-#                 }
-#               ]
-#             }
-#           ]
-#         }
-#       }
-#     })
-#   ]
-# }
-
-# # Este recurso se encarga de enviar los cambios generados por el DATA a las VMs reales
-# resource "talos_machine_configuration_apply" "this" {
-#   for_each = var.vms
-
-#   client_configuration        = var.client_configuration # Credenciales de talosconfig
-#   machine_configuration_input = data.talos_machine_configuration.this[each.key].machine_configuration
-#   node                        = each.value.ip // La IP de la VM en Proxmox
-
-#   # Esto asegura que si cambia la seguridad, Talos aplique el parche de inmediato
-#   lifecycle {
-#     create_before_destroy = false
-#   }
-# }
-# El comando para mutar el clúster
-# terraform apply -var="is_development=false"
-
-
-
-
-
-
-# Aquí te muestro como tengo actualmente ese fragmento de código en terraform (ya le agregué el extraMounts); tú me dirás si debo ajustarle algo:
-
-# ```hcl
-# data "talos_machine_configuration" "this" {
-#   for_each         = var.vms
-
-#   cluster_name     = var.cluster_name
-#   cluster_endpoint = var.cluster_endpoint # IP del CP principal o Balanceador
-#   machine_type     = each.value.is_cp ? "controlplane" : "worker"
-#   machine_secrets  = var.machine_secrets
-
-#   config_patches = compact([
-#     # Parche 1: Configuración de red e instalación
-#     yamlencode({
-#       machine = {
-#         install = {
-#           image = var.install_image
-#         }
-#         nodeLabels = {
-#           "topology.kubernetes.io/zone" = each.value.zone
-#           "custom-role" = each.value.role
-#         }
-#         network = {
-#           interfaces = [
-#             {
-#               deviceSelector = {
-#                 hardwareAddr = each.value.mac_address  # Propiedad nativa oficial v1alpha1
-#               }
-#               dhcp      = false
-#               addresses = ["${each.value.ip}${var.network_cidr}"]
-#               routes    = [
-#                 {
-#                   network = "0.0.0.0/0",
-#                   gateway = var.network_gateway
-#                 }
-#               ]
-#               # Adición de VIP: Solo se inyecta en la interfaz si la máquina es Control Plane
-#               vip = each.value.is_cp ? {
-#                 ip = var.cluster_vip
-#               } : null
-#             }
-#           ]
-#           nameservers = [
-#             "1.1.1.1",
-#             "8.8.8.8"
-#           ]
-#         }
-#         kubelet = {
-#           extraArgs = {
-#             rotate-server-certificates = "true" # Permite que el nodo pida renovar sus certificados automáticamente
-#           }
-#           extraConfig = {
-#             serverTLSBootstrap = true
-#           }
-#           # Asegura que Kubelet apunte al IP del servicio DNS
-#           clusterDNS = ["10.96.0.10"]
-#           # OpenEBS Local PV necesita acceso a rutas de host específicas
-#           extraMounts = each.value.node_type == "worker" ? [
-#             {
-#               destination = "/var/openebs/local"
-#               type        = "bind"
-#               source      = "/var/openebs/local"
-#               options     = ["bind", "rshared", "rw"]
-#             }
-#           ] : []
-#         }
-#         # Desactiva el resolvedor de caché DNS del host y utiliza directamente los resolvedores DNS configurados
-#         features = {
-#           hostDNS = {
-#             enabled = false
-#             forwardKubeDNSToHost = false
-#           }
-#         }
-#       }
-#     }),
-#     # Parche 2: Configuración del hostname (documento separado)
-#     yamlencode({
-#       apiVersion = "v1alpha1"
-#       kind       = "HostnameConfig"
-#       hostname   = each.key
-#       auto       = "off"
-#     }),
-#     # Parche 3: Cofiguración a nivel de clúster (Solo para Control Planes)
-#     each.value.is_cp ? yamlencode({
-#       cluster = {
-#         # Configuración para deshabilitar Flannel (cni name=none) y kube-proxy,
-#         # ya que posteriormente configuraremos nuestro CNI con Cilium
-#         network = {
-#           cni = {
-#             name = "none"
-#           }
-#         }
-#         proxy = {
-#           disabled = true
-#         }
-#         # Deshabilitamos CoreDNS ya que lo vamos a hacer una instalación custom
-#         coreDNS = {
-#           disabled = true
-#         }
-#         # Control de Admisión Híbrido
-#         apiServer = {
-#           admissionControl = [
-#             {
-#               name = "PodSecurity"
-#               configuration = {
-#                 apiVersion = "pod-security.admission.config.k8s.io/v1"
-#                 kind       = "PodSecurityConfiguration"
-#                 defaults = {
-#                   enforce         = var.is_development ? "privileged" : "baseline"
-#                   enforce-version = "latest"
-#                   audit           = var.is_development ? "privileged" : "restricted"
-#                   audit-version   = "latest"
-#                   warn            = var.is_development ? "privileged" : "baseline"
-#                   warn-version    = "latest"
-#                 }
-#                 exemptions = {
-#                   usernames      = []
-#                   runtimeClasses = []
-#                   namespaces     = [] # Lo dejamos vacío ya que Talos ya exime a "kube-system" internamente
-#                 }
-#               }
-#             }
-#           ]
-#         }
-#       }
-#     }) : "" # Si es un worker, devuelve una cadena vacía que compact() eliminará
-#   ])
-# }
-# ```

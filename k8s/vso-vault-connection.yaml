@@ -1,0 +1,17 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: vault-connection
+  namespace: vault-secrets-operator
+# https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference#vaultconnectionspec
+spec:
+  # La IP y puerto del contenedor LXC de Proxmox de HashiCorp Vault
+  # También podríamos usar "https://vault.eljavatar.home:8200" ya que en
+  # el hosts del CoreDNS del clúster configuramos esa URL
+  address: https://192.168.0.20:8200
+  # the trusted PEM encoded CA certificate chain stored in a Kubernetes Secret
+  caCertSecretRef: vault-ca-cert
+  # Para pruebas rápidas podríamos omitir la verificación TLS, pero no se recomienda
+  # para entornos productivos. En este caso no necesitamos skipearla ya que le estamos
+  # pasando el certificado a través de caCertSecretRef
+  # skipTLSVerify: true

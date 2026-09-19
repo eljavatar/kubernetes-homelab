@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-token-reviewer-sa
+  namespace: external-auth
+---
+# Este binding (con el rol system:auth-delegator) le permite a Vault delegar la autenticación mediante un POST al recurso
+# 'tokenreviews.authentication.k8s.io' para validar si el token es real y está activo.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-token-reviewer-auth-binding
+subjects:
+  - kind: ServiceAccount
+    name: vault-token-reviewer-sa
+    namespace: external-auth
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator # Apunta al rol que permite validar Tokens
+  apiGroup: rbac.authorization.k8s.io
+---
+# En la configuración del método de autenticación de Vault podemos configurar el flag 'use_annotations_as_alias_metadata=true',
+# lo cual nos permite usar el parámetro {{identity.entity.aliases.<mount accessor>.metadata.<metadata key>}}, de modo tal que
+# el valor de '<metadata key>' lo extraería de la anotación 'vault.hashicorp.com/alias-metadata-<metadata key>' que configuremos
+# en la ServiceAccount que usemos para autenticarnos (no confundir con la ServiceAccount del revisor 'vault-token-reviewer-sa').
+# https://developer.hashicorp.com/vault/docs/auth/kubernetes#working-with-templated-policies
+# 
+# Sin embargo, como se menciona en la documentación, al activar 'use_annotations_as_alias_metadata=true', Vault necesita
+# permiso explícito para leer (hacer get) las ServiceAccounts del clúster de Kubernetes. De lo contrario, no podrá extraer
+# las anotaciones cuando el Pod intente autenticarse.
+# 
+# Para resolver esto, creamos un ClusterRole (o Role) que estará dedicado a la lectura de metadatos, y lo enlazamos a la misma
+# cuenta de servicio que usará el revisor de tokens (vault-auth-reviewer-sa) mediante un ClusterRoleBinding adicional.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vault-token-reviewer-metadata-role
+rules:
+  # Podríamos definir también los permisos de Create sobre el TokenReviewer, y así tener un solo ClusterRole y
+  # un solo ClusterRoleBinding; sin embargo, en este caso los dejaré por separado
+  # - apiGroups: ["authentication.k8s.io"]
+  #   resources: ["tokenreviews"]
+  #   verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    # Vault necesita obligatoriamente 'get' y 'list' para inspeccionar las anotaciones
+    verbs: ["get", "list"]
+---
+# Este binding (con el rol vault-auth-reviewer-metadata-role) le permite a Vault preguntar por las anotaciones
+# 'vault.hashicorp.com/alias-metadata-<metadata key>' de la ServiceAccount usada para la autenticación.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-token-reviewer-metadata-binding
+subjects:
+  - kind: ServiceAccount
+    name: vault-token-reviewer-sa
+    namespace: external-auth
+roleRef:
+  kind: ClusterRole
+  name: vault-token-reviewer-metadata-role # Apunta al rol de lectura de SA
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-token-reviewer-secret
+  namespace: external-auth
+  annotations:
+    # Dado que desde Kubernetes 1.24+ los ServiceAccounts ya no generan automáticamente un secreto con su token,
+    # crearlo explícitamente con la anotación kubernetes.io/service-account.name es el paso exacto requerido en
+    # clústeres modernos como Talos.
+    kubernetes.io/service-account.name: vault-token-reviewer-sa
+type: kubernetes.io/service-account-token

@@ -1,0 +1,83 @@
+# Default values: https://artifacthub.io/packages/helm/external-secrets-operator/external-secrets/2.9.0?modal=values
+
+installCRDs: true
+
+nodeSelector:
+  kubernetes.io/hostname: "worker-ops-02"
+
+serviceMonitor:
+  enabled: false
+
+# Lo habilitamos para exponer las métricas en /metrics, ya que no usamos Prometheus
+# https://external-secrets.io/latest/api/metrics/
+metrics:
+  service:
+    enabled: true
+
+webhook:
+  nodeSelector:
+    kubernetes.io/hostname: "worker-ops-02"
+  metrics:
+    service:
+      enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+certController:
+  nodeSelector:
+    kubernetes.io/hostname: "worker-ops-02"
+  metrics:
+    service:
+      enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Inyectar el volumen en el Pod del controlador de ESO
+extraVolumes:
+  - name: vault-ca-volume
+    configMap:
+      name: vault-ca-cert
+      # Si en el configmap, el nombre donde está el certificado TLS no termina en '.crt'
+      # debemos usar items para mapearlo:
+      # items:
+      #   - key: **clave-cualquiera.pem** # Nombre exacto que está en el ConfigMap
+      #     path: vault-ca.crt   # Nombre temporal para el archivo (debe terminar en '.crt')
+    # En caso de usar un secreto
+    # secret:
+    #   secretName: vault-server-tls-secret
+
+# Montar el archivo individualmente dentro de las CAs del sistema operativo
+extraVolumeMounts:
+  - name: vault-ca-volume
+    mountPath: /etc/ssl/certs/vault-ca.crt # Para que ESO lo reconozca debe estar en el path '/etc/ssl/certs/'
+    # Cuando usamos subPath para montar un archivo individual dentro de un directorio existente, Kubernetes realiza
+    # un montaje estático. Los cambios que ocurran en el ConfigMap original NO se actualizarán dentro del Pod debido
+    # a esta limitación del diseño de Linux y Kubernetes.
+    # Por eso, en nuestro caso hacemos un 'rollout' manual del pod desde el CronJob. También podríamos implementar
+    # otras estrategias como por ejemplo el uso de Reload funcionalidad nativa llamada SHA Annotation Trigger.
+    subPath: vault-ca.crt  # Evita que se borren los certificados nativos del contenedor
+    # subPath: ca.crt # Los secretos TLS de cert-manager guardan la CA en 'ca.crt'
+
+# Para ver los parámetros que acepta, ejecutamos:
+# kubectl run eso-es-help --image=ghcr.io/external-secrets/external-secrets:v2.9.0 --rm -it --restart=Never -- --help
+# En caso de que no se elimine cuando terminemos: kubectl delete pod eso-es-help
+# O en el source en Go: https://github.com/external-secrets/external-secrets/blob/main/cmd/controller/root.go
+extraArgs: {}

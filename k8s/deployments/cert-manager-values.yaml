@@ -15,6 +15,14 @@ extraArgs:
 nodeSelector:
   kubernetes.io/hostname: "worker-ops-02"
 
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
 # Ajustes de seguridad compatibles con Talos OS y Cilium
 securityContext:
   runAsNonRoot: true
@@ -36,7 +44,21 @@ prometheus:
 webhook:
   nodeSelector:
     kubernetes.io/hostname: "worker-ops-02"
+  resources:
+    requests:
+      cpu: 30m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 cainjector:
   nodeSelector:
     kubernetes.io/hostname: "worker-ops-02"
+  resources:
+    requests:
+      cpu: 30m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi

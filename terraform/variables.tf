@@ -8,6 +8,11 @@ variable "pmx02_token" {
   sensitive = true
 }
 
+variable "vault_token" {
+  type      = string
+  sensitive = true
+}
+
 variable "personal_email" {
   type        = string
   description = "Correo electrónico personal para alertas de vencimiento de Let's Encrypt"
@@ -59,8 +64,6 @@ variable "use_letsencrypt_prod" {
   default     = false
   description = "Si es true, crea el Certificando usando el ambiente productivo de Let's Encrypt. Si es false, usa el ambiente de Stage"
 }
-
-
 
 # variable "domain_name" {
 #   type        = string
