@@ -1,0 +1,84 @@
+# https://argo-rollouts.readthedocs.io/en/stable/features/specification/
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bluegreen-demo
+---
+# Se deben crear 2 Services: uno para la versión actual (active) y otro para la versión a promover (review)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollout-bluegreen-active
+  namespace: bluegreen-demo
+spec:
+  selector:
+    app: rollout-bluegreen
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80 # This is what the service is listening on, and what will be routed to
+      targetPort: 8080 # Port the pods are listening on, don't route directly here!
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollout-bluegreen-preview
+  namespace: bluegreen-demo
+spec:
+  selector:
+    app: rollout-bluegreen
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80 # This is what the service is listening on, and what will be routed to
+      targetPort: 8080 # Port the pods are listening on, don't route directly here!
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-bluegreen
+  namespace: bluegreen-demo
+spec:
+  replicas: 2
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: rollout-bluegreen
+  template:
+    metadata:
+      labels:
+        app: rollout-bluegreen
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "worker-apps-01"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101 # non‑root UID that the image can run as
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:blue
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+  strategy:
+    blueGreen:
+      # activeService specifies the service to update with the new template hash at time of promotion.
+      # This field is mandatory for the blueGreen update strategy.
+      activeService: rollout-bluegreen-active
+      # previewService specifies the service to update with the new template hash before promotion.
+      # This allows the preview stack to be reachable without serving production traffic.
+      # This field is optional.
+      previewService: rollout-bluegreen-preview
+      # autoPromotionEnabled disables automated promotion of the new stack by pausing the rollout
+      # immediately before the promotion. If omitted, the default behavior is to promote the new
+      # stack as soon as the ReplicaSet are completely ready/available.
+      # Rollouts can be resumed using: `kubectl argo rollouts promote ROLLOUT`
+      autoPromotionEnabled: false

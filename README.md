@@ -183,6 +183,15 @@ vault version
 # Vault v2.0.4
 ```
 
+- **Plugin de Argo Rollouts** (para monitorear estado de rollouts BlueGreen y Canary de Argo Rollouts)
+```sh
+brew install argoproj/tap/kubectl-argo-rollouts
+
+# Validar instalación
+kubectl-argo-rollouts version
+# kubectl-argo-rollouts: v1.10.0+d90700a
+```
+
 Para validar que tenemos instaladas las dependencias que requerimos, podemos ejecutar `make check-deps`.
 
 
@@ -2823,6 +2832,134 @@ kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-contro
 ```
 
 
+### Argo Rollouts
+
+**Argo Rollouts** es un controlador de Kubernetes que aporta capacidades de despliegue progresivo (canary, blue-green y experimentation) mediante un CRD propio llamado `Rollout`, que sustituye al `Deployment` estándar cuando se necesita control fino del tráfico. Se integra con proveedores de red (Cilium, NGINX, Istio, Traefik, Gateway API, etc.) para el reparto de tráfico por pesos y con `AnalysisTemplate` para promocionar o revertir automáticamente según métricas.
+
+En este homelab se instala con los CRDs gestionados por el propio chart, el controlador en Alta Disponibilidad (2 réplicas con leader election distribuidas en los nodos `ops`/`apps`), un `PodDisruptionBudget` para convivir con el Descheduler, y el dashboard en modo **solo lectura** sobre un `ClusterIP` (puerto `3100`).
+
+Para instalarlo ejecutamos lo siguiente:
+
+```sh
+# Agregamos el repositorio
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+
+# Instalamos (Chart 2.43.6 -> App v1.10.0)
+helm upgrade --install argo-rollouts argo/argo-rollouts --version 2.43.6 \
+  -n argo-rollouts --create-namespace \
+  -f k8s/deployments/argo-rollouts-values.yaml
+```
+
+Para validar la instalación:
+
+```sh
+# Controlador y dashboard
+kubectl get -n argo-rollouts deployment/argo-rollouts -o wide
+kubectl get -n argo-rollouts pods -o wide
+
+# CRDs registrados
+kubectl get crds | grep argoproj.io
+
+# Comprobación de la CLI de rollouts (opcional)
+kubectl argo rollouts list rollouts -n <namespace>
+```
+
+> **Exposición opcional vía Gateway API:** el chart 2.43.6 soporta nativamente `dashboard.httproute`, por lo que en nuestro caso publicamos el dashboard bajo el Gateway existente en lugar de tener que hacer un `port-forward`, aprovechando el `internal CA` ya configurado (no olvidar agregar la ruta `argorollouts.eljavatar.home` al servicio DNS local que se tenga configurado o en su defecto, al archivo `/etc/hosts`).
+
+> **Nota de integración con Reloader:** si se gestionan Rollouts y se quiere reiniciar pods ante cambios de `ConfigMap`/`Secret`, activar `reloader.isArgoRollouts: true` en `k8s/deployments/reloader-values.yaml`.
+
+#### Accionables automatizados con base en Métricas de despliegue
+
+Aquí no voy a entrar mucho en detalle ahora, pero creo que vale la pena mencionar que una de las características más interesantes de Argo Rollouts es el poder monitorear un despliegue y ejecutar acciones automáticas con base en el estado de la aplicación.
+
+Esto se lograría mediante un componente `AnalysisTemplate`, el cual interroga al sistema de monitoreo (como Prometheus, Datadog, VictoriaMetrics (vía prometheus), HTTP Requests, etc.) en tiempo real, de tal modo que si por ejemplo la tasa de errores sube o las peticiones se ponen lentas, Argo Rollouts puede abortar el despliegue y hacer un rollback automático a 0% inmediatamente, dejando activa solamente la versión previa al despliegue.
+
+Veamos un ejemplo de cómo se verían los manifiestos:
+
+1. **El Molde de Análisis (`AnalysisTemplate`):** Este archivo le dice a Argo qué y cómo medir. En este ejemplo, mediremos la tasa de éxito de los HTTP status codes:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: tasa-exito-http
+  namespace: mi-aplicacion
+spec:
+  metrics:
+  - name: success-rate
+    # Con qué frecuencia consulta la métrica (cada 5 minutos)
+    interval: 5m
+    # Cuántos fallos consecutivos se permiten antes de abortar el despliegue
+    failureLimit: 1
+    # La consulta que le hará por ejemplo Prometheus
+    provider:
+      prometheus:
+        address: http://prometheus.svc.cluster.local # URL de Prometheus
+        query: |
+          sum(rate(http_requests_total{status=~"2.*|3.*", app="mi-app"}[5m])) 
+          / 
+          sum(rate(http_requests_total{app="mi-app"}[5m]))
+    # Condición de éxito: La tasa de peticiones correctas debe ser mayor al 95%
+    successCondition: result[0] >= 0.95
+```
+
+2. **Vinculación en el `Rollout`**: Ahora, en el archivo principal de la aplicación, le indicamos a Argo que mantenga por ejemplo el tráfico al 10% y que ejecute el análisis durante ese tiempo:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: mi-app-rollout
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      steps:
+        - setWeight: 10
+          # Mantiene el 10% de tráfico durante 24 horas de forma controlada
+          pause: { duration: 24h }
+      # Vinculamos el análisis para que corra en paralelo durante esas 24 horas
+      analysis:
+        templates:
+          - templateName: tasa-exito-http
+```
+
+En este ejemplo, durante las 24 horas que el tráfico está al 10%, Argo ejecutará la consulta de Prometheus cada 5 minutos. Si en algún momento la tasa de éxito cae por debajo del 95%, el despliegue se cancela inmediatamente y el tráfico vuelve al 100% hacia la versión anterior.
+
+#### Garantizar una ventana de Rollback Inmediato (Mantener la versión vieja viva)
+
+En Kubernetes nativo, cuando un despliegue llega al 100%, los Pods de la versión anterior se destruyen de inmediato. Si se descubre un bug a las dos horas, hacer un rollback implica volver a descargar la imagen vieja y esperar a que los Pods inicien, rompiendo la premisa de "inmediatez".
+
+Para emular un tiempo de gracia (por ejemplo 2 o 4 horas), usamos la estrategia `blueGreen` (o `canary` al 100%) configurando retrasos de escalado en el Rollout:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: mi-app-bluegreen
+spec:
+  replicas: 10
+  # Mantiene hasta 3 versiones anteriores disponibles en el clúster por seguridad
+  revisionHistoryLimit: 3
+  strategy:
+    blueGreen:
+      activeService: servicio-activo
+      previewService: servicio-preview
+      # LA CLAVE: Retrasa el apagado de los Pods viejos (14400 segundos = 4 horas)
+      scaleDownDelaySeconds: 14400 
+      # Mantiene el ReplicaSet viejo creado aunque tenga 0 pods (para un escalado flash)
+      scaleDownDelayRevisionLimit: 1
+```
+
+**¿Cómo funciona este mecanismo de seguridad?**
+
+1. Se hace el cambio de tráfico (el *switcheo*) al 100% hacia la versión Verde.
+2. Gracias a `scaleDownDelaySeconds: 14400`, Argo Rollouts no matará los Pods Azules (viejos). Los dejará encendidos, consumiendo recursos pero con el tráfico en 0% a nivel de `Service` por 4 horas.
+3. Si por ejemplo a las 3 horas del despliegue el sistema de base de datos se satura o se encuentra un bug crítico en caliente, se ejecutaría lo siguiente: `kubectl argo rollouts undo mi-app-bluegreen`.
+4. El balanceador del Gateway API redirige el tráfico de vuelta a los Pods viejos. Como estos ya estaban encendidos, listos y con la memoria caliente (*warm*), el rollback toma menos de un segundo. Pasadas las 4 horas sin alertas, Argo finalmente destruye los Pods viejos para liberar CPU y RAM en el clúster.
+
+
 ### Reloader
 
 Hay un problema clásico en Kubernetes: si inyectamos secretos o configuraciones como variables de entorno (`env`), el Pod no se enterará del cambio hasta que se reinicie.
@@ -3746,5 +3883,253 @@ kubectl events --types=Warning -n playground --for vaultauths.secrets.hashicorp.
 # También podemos mirar los logs del operador de VSO para encontrar la causa del error:
 kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-controller-manager -f --tail=100
 ```
+
+
+
+## Prueba de Despliegue Blue-Green con Argo Rollouts
+
+### ¿Cómo funciona un despliegue Blue-Green?
+
+Un despliegue **blue-green** (azul-verde) es una estrategia de publicación de software que permite actualizar una aplicación en producción sin causar interrupciones para los usuarios.
+
+1. **Dos entornos idénticos:** Se mantienen dos entornos de producción iguales, llamados Azul (Blue) y Verde (Green).
+2. **Entorno activo:** Uno de ellos (por ejemplo, el azul) está funcionando en vivo y recibe todo el tráfico de los usuarios con la versión actual y estable.
+3. **Actualización en paralelo:** La nueva versión del software se instala y se prueba en el entorno inactivo (el verde), sin afectar a los usuarios.
+4. **Cambio de tráfico:** Una vez que se comprueba que el entorno verde funciona bien, un balanceador de carga (o un cambio de rutas) redirige todo el tráfico de los usuarios del azul al verde de forma instantánea.
+
+**Beneficios principales**
+
+- **Cero tiempo de inactividad:** Los usuarios no sufren cortes en el servicio durante el cambio.
+- **Reversión instantánea (_rollback_):** Si el nuevo entorno (verde) presenta fallos graves, el tráfico se puede volver a dirigir inmediatamente al entorno anterior (azul).
+- **Menor riesgo:** Las pruebas finales se hacen en un entorno de producción real y aislado antes de mostrarlo al público.
+
+**Desventajas**
+
+- **Mayor costo de infraestructura:** Requiere mantener duplicados todos los recursos (servidores, bases de datos o clústeres) al mismo tiempo, lo que puede elevar los gastos.
+- **Complejidad en bases de datos:** Sincronizar los cambios de esquema o datos entre ambas versiones si comparten información puede resultar complejo.
+
+
+### ¿Cómo se Configura y se da el Flujo en Argo Rollouts?
+
+Para configurar este despliegue se necesitan tres recursos clave en el manifiesto:
+
+- **El recurso `Rollout`:** Reemplaza al `Deployment` tradicional (cambiando `kind: Deployment` por `kind: Rollout`). En su sección de estrategia (`strategy`), se especifica que es de tipo `blueGreen`.
+- **Servicio Activo (`activeService`):** El `Service` de Kubernetes principal que apunta a la versión estable actual (el entorno Azul) y que recibe el tráfico real de producción.
+- **Servicio de Vista Previa (`previewService`):** Un segundo `Service` independiente que apunta a la nueva versión (el entorno Verde) para realizar pruebas internas antes del lanzamiento.
+
+El controlador automatiza todo el proceso a través de la inyección dinámica de etiquetas (labels y selectors):
+
+```text
+[ Tráfico Usuarios ] ──► [ activeService ] ──────► [ ReplicaSet Viejo (Azul) ]
+                                                        
+[ Tráfico Pruebas ] ──► [ previewService ] ─────► [ ReplicaSet Nuevo (Verde) ]
+```
+
+1. **Estado Inicial:** Se tiene una aplicación corriendo en la versión 1. Tanto el `activeService` como el `previewService` apuntan al mismo conjunto de Pods (versión estable).
+2. **El Disparador (Push):** Se actualiza la imagen del contenedor en el manifiesto `Rollout` (por ejemplo, de la versión `v1` a la `v2`).
+3. **Despliegue del Entorno Verde:** Argo Rollouts detecta el cambio y crea un nuevo `ReplicaSet` (el entorno Verde). Automáticamente, modifica el selector del `previewService` inyectándole un *hash* único para que apunte exclusivamente a estos nuevos Pods `v2`. El tráfico de producción (`activeService`) sigue intacto en la versión `v1`.
+4. **Fase de Pausa y Análisis:** El despliegue se pausa. Aquí se puede validar manualmente la versión `v2` usando la URL del servicio de vista previa, o dejar que un componente de Argo llamado `AnalysisTemplate` corra pruebas automatizadas (por ejemplo, consultando métricas en Prometheus).
+5. **La Promoción (El Cambio de Vías):** Si las pruebas son exitosas, Argo Rollouts cambia instantáneamente (ya sea mediante aprobación manual con `kubectl argo rollouts promote` o de manera automatizada) el selector del `activeService` para que apunte al nuevo `ReplicaSet` (`v2`). En este microsegundo, todos los usuarios ya están usando la nueva versión.
+6. **Limpieza o Rollback:**
+	 - **Si todo sale bien:** Tras un tiempo configurable (`scaleDownDelaySeconds`), el controlador escala a cero los Pods antiguos (`v1`) para no desperdiciar recursos del clúster.
+	 - **Si algo sale mal:** Se ejecuta un `undo` o se aborta el rollout, y el `activeService` vuelve a apuntar de inmediato al `ReplicaSet` viejo que seguía encendido, logrando una reversión instantánea.
+
+
+### Ejecución de la Prueba BlueGreen
+
+Para visualizar la prueba en acción más fácilmente, configuramos nuestro manifiesto para que la promoción de la nueva versión no se haga automáticamente `autoPromotionEnabled: false`. Así pues, seguimos los siguientes pasos:
+
+1. Ejecutar la primera versión, la blue (en la primera ventana de terminal):
+   ```sh
+   kubectl apply -f tests/argorollouts-bluegreen-demo.yaml
+   ```
+
+2. Aquí vamos a abrir 3 ventanas de terminal adicionales y 3 ventanas del navegador, de modo tal que tendremos lo siguiente en cada una de ellas (lo ideal es organizarlas de modo tal que las podamos ver todas al mismo tiempo):
+   - **Terminal 1:** Es la que ya tenemos abierta actualmente, y es donde vamos a estar ejecutando los comandos en los próximos pasos.
+   - **Terminal 2:** Ejecutamos `kubectl argo rollouts get rollout -n bluegreen-demo rollout-bluegreen --watch` para monitorear las versiones; podemos ver que hay una revisión (la 1) con estado `stable,active`.
+   - **Terminal 3:** Ejecutamos `kubectl port-forward service/rollout-bluegreen-active 8081:80 -n bluegreen-demo` para acceder desde el navegador a la versión actual (la azul).
+   - **Terminal 4:** Ejecutamos `kubectl port-forward service/rollout-bluegreen-preview 8082:80 -n bluegreen-demo` para acceder desde el navegador a la versión a promocionar (la verde).
+   - **Ventana de Navegador 1:** Entramos a `https://argorollouts.eljavatar.home/rollouts` para monitorear las versiones, pero esta vez desde el navegador; debemos asegurarnos de seleccionar el namespace `bluegreen-demo` en la esquina superior derecha; aquí veremos que hay activas 2 instancias (pods) de una versión (Revisión 1).
+   - **Ventana de Navegador 2:** Entramos a `http://localhost:8081` para monitorear el tráfico de la versión actual (la azul); en este momento veremos solo cuadros azules, ya que ambos `Service` apuntan a pods con la misma versión actual (la azul).
+   - **Ventana de Navegador 3:** Entramos a `http://localhost:8082` para monitorear el tráfico de la versión a promocionar (la verde); en este momento veremos solo cuadros azules, ya que ambos `Service` apuntan a pods con la misma versión actual (la azul).
+
+3. En la Terminal 1, ejecutar el rollout de la nueva versión, la verde (podríamos hacerlo modificando el manifiesto (que es lo que normalmente haríamos en producción), pero el plugin de Argo Rollouts nos brinda una forma sencilla de hacerlo para pruebas rápidas sin tener que actualizar el manifiesto):
+   ```sh
+   kubectl argo rollouts set image -n bluegreen-demo rollout-bluegreen rollouts-demo=argoproj/rollouts-demo:green
+   ```
+
+   En este momento, como no hemos hecho la promoción, las dos versiones convivirán al mismo tiempo, por lo tanto, veremos lo siguiente:
+
+   - **Terminal 2:** Veremos que se crea una nueva revisión (la 2) con sus respectivos pods, y queda en estado `preview`, mientras la otra revisión (la 1) aún sigue en estado `stable,active`.
+   - **Terminal 4:** Aquí no veremos cambios, pero para que se actualice la ventana que tiene abierta la URL `http://localhost:8082`, debemos parar el comando de esta terminal y volver a ejecutar `kubectl port-forward service/rollout-bluegreen-preview 8082:80 -n bluegreen-demo`, ya que a menos que se establezca una nueva conexión TCP, el túnel no actualiza automáticamente la redirección del `Service` hacia uno de los nuevos pods.
+   - **Ventana de Navegador 1:** Veremos que se crea una nueva revisión (la 2), y muestra que todas las instancias de ambas revisiones están activas.
+   - **Ventana de Navegador 3:** Después de re-ejecutar el comando en la terminal 4, aquí veremos cuadros verdes, lo que indica que en efecto ese `Service` ya está apuntando a un pod con la versión de preview (la verde). 
+
+4. En la Terminal 1, ejecutar el siguiente comando para promocionar la nueva versión:
+   ```sh
+   kubectl argo rollouts promote -n bluegreen-demo rollout-bluegreen
+   ```
+
+   Después de ejecutar la promoción veremos lo siguiente:
+
+   - **Terminal 2**: La revisión que estaba en estado `preview` (la 2), ahora se marca en estado `stable,active`, y a la anterior (la 1) se le asigna un delay de 30 segundos; al pasar esos 30 segundos quedará con estado `ScaledDown` (sin instancias activas).
+   - **Ventana de Navegador 1:** Se muestra que se desescalan las instancias de la revisión 1, quedando activas solo las de la revisión 2.
+   - **Terminal 3 y Ventana de Navegador 2:** En esta terminal se indica que se perdió la conexión (porque el pod al que apuntaba el `Service` al momento de abrir el túnel ya no existe) y en la ventana del navegador ya no se muestran indicios de tráfico (todos los cuadros de color azul desaparecen); así que si volvemos a ejecutar en esta terminal el comando `kubectl port-forward service/rollout-bluegreen-active 8081:80 -n bluegreen-demo`, en la ventana del navegador empezaremos a ver cuadros verdes, lo que confirma que este `Service` ahora apunta a un pod con la nueva versión (la verde).
+
+5. Al finalizar la prueba podemos simplemente eliminar el namespace:
+   ```sh
+   kubectl delete ns bluegreen-demo
+   ```
+
+
+### Consideraciones en entornos Productivos
+
+Esta prueba que ejecutamos nos permite visualizar gráficamente en el navegador cómo se daría el flujo de tráfico entre ambas versiones, sin embargo, en un entorno real en el que accedemos por ejemplo a través de un `HTTPRoute` (mediante `Gateway API`), la configuración estándar va a estar apuntando al `Service` `active`, por lo que la nueva versión, la `preview` se quedaría completamente aislada del exterior, atrapada dentro del clúster.
+
+Para probar y validar esa nueva versión Verde sin enviarle tráfico real de producción, podríamos utilizar tres estrategias principales con **Gateway API** y **Argo Rollouts**:
+
+#### Estrategia 1: Exposición en paralelo (Dos HTTPRoutes)
+
+Es la opción más común y limpia en entornos empresariales. Consiste en crear dos recursos `HTTPRoute` distintos vinculados al mismo Gateway API:
+
+1. **`HTTPRoute` de Producción:** Responde al dominio oficial (ej. `some-app.eljavatar.org`) y apunta al `activeService`.
+2. **`HTTPRoute` de Preview:** Responde a un subdominio de pruebas (ej. `some-app-internal-preview.eljavatar.org`) y apunta exclusivamente al `previewService`.
+
+**¿Cómo se valida?**
+
+El equipo de QA o scripts de pruebas automatizadas envían tráfico directamente a `some-app-internal-preview.eljavatar.org`. Como Argo Rollouts se encarga de modificar los pods que están detrás del `previewService`, este subdominio siempre mostrará la versión Verde en desarrollo durante el rollout. Una vez promovida, ambas URLs mostrarán temporalmente la nueva versión.
+
+#### Estrategia 2: Enrutamiento por Headers en la misma HTTPRoute
+
+Si no se quiere, o no se pueden manejar múltiples subdominios, se puede aprovechar la característica nativa de Gateway API para inspeccionar las cabeceras HTTP de la petición utilizando el [Plugin de Gateway API para Argo Rollouts](https://rollouts-plugin-trafficrouter-gatewayapi.readthedocs.io/en/latest/).
+
+Para esto, se configura un solo `HTTPRoute` con reglas basadas en headers:
+
+- Si la petición viene de un usuario común, va al `activeService`.
+- Si la petición incluye un Header especial (ej. `X-Beta-Tester: true` o `User-Agent: QA-Automation`), el Gateway la desvía hacia el `previewService`.
+
+**¿Cómo se valida?**
+
+Las herramientas de pruebas (o uno mismo usando una extensión de navegador para modificar cabeceras) inyectan ese header. Al hacerlo, el Gateway nos dejaría pasar al entorno Verde de manera transparente usando el mismo dominio de producción.
+
+#### Estrategia 3: Pruebas Internas Automatizadas (Análisis en el Clúster)
+
+Si la nueva versión no necesita ser accedida desde el navegador por una persona antes de pasar a producción, se puede delegar la validación al clúster de Kubernetes usando `AnalysisTemplates` de Argo.
+
+1. El `Rollout` detecta el cambio de versión y levanta los pods del `previewService`.
+2. Antes de cambiar el tráfico, Argo ejecuta un Pod temporal con pruebas de integración (como un script de Python o un comando `curl` o `K6`) que ataca internamente la URL interna del clúster: `http://cluster.local`.
+3. Si el script responde `HTTP 200` y pasa las pruebas de humo, Argo se autopromueve y cambia la `HTTPRoute` de producción.
+
+#### ¿Cuál se debería elegir?
+
+Como casi todo en ingeniería de software, depende del caso y las necesidades:
+
+| Escenario | Solución recomendada |
+|-----------|----------------------|
+| Se requiere que un **QA humano** o **clientes seleccionados** prueben visualmente la web / aplicación | **Estrategia 1** (Dos dominios/HTTPRoutes independientes) |
+| Se quiere probar en el entorno real de producción pero **oculto tras un "pase VIP"** | **Estrategia 2** (Filtro por Headers en el HTTPRoute) |
+| Se quiere un flujo **100% automatizado (CI/CD)** sin intervención humana | **Estrategia 3** (AnalysisTemplates apuntando al servicio interno) |
+
+
+
+## Prueba de Despliegue Canary con Argo Rollouts
+
+### ¿Cómo funciona un despliegue Canary?
+
+Un **despliegue canary** (o lanzamiento canario) es una estrategia de publicación de software en la que una nueva versión de una aplicación se lanza de forma gradual a un pequeño grupo de usuarios o servidores en producción antes de llegar al 100% del total de usuarios.
+
+- **División del tráfico:** Se dirige solo un porcentaje pequeño del tráfico (por ejemplo, el 1%, el 5% o el 10%) hacia la nueva versión, mientras que el resto de los usuarios sigue usando la versión estable anterior.
+- **Monitoreo:** Se vigilan métricas clave en tiempo real, como la tasa de errores, el consumo de recursos (CPU/memoria) y la latencia.
+- **Escalado o reversión:** Si todo funciona bien, se aumenta progresivamente el porcentaje de tráfico (ejemplo: 25%, 50%, 75%) hasta completar el despliegue. Si se detecta un fallo, se hace un rollback (reversión) inmediato a la versión anterior con un impacto mínimo.
+
+**Ventajas:**
+
+- Reduce drásticamente el riesgo de fallos masivos en producción.
+- Permite probar el rendimiento y recibir retroalimentación con tráfico real.
+- Evita o minimiza el tiempo de inactividad (*downtime*).
+
+**Desventajas:**
+
+- Puede requerir duplicar recursos o infraestructura temporalmente.
+- El proceso total de lanzamiento es más lento al requerir fases de observación.
+
+
+### ¿Cómo funciona el flujo Canary con Argo Rollouts?
+
+En el ecosistema de Kubernetes, el objeto nativo `Deployment` no soporta despliegues canary basados en porcentajes reales de tráfico; solo permite estrategias básicas como `RollingUpdate`. Así que para solucionar esto, [Argo Rollouts provee un controlador](https://argo-rollouts.readthedocs.io/en/stable/features/traffic-management/) que introduce capacidades de entrega progresiva avanzada.
+
+Cuando se actualiza el contenedor (la imagen de la aplicación) en el archivo manifiesto de Kubernetes, Argo Rollouts automatiza el ciclo de vida del canario de la siguiente manera:
+
+1. **Creación del nuevo ReplicaSet (Canary):** Argo Rollouts levanta un nuevo `ReplicaSet` con la versión nueva de la app de forma paralela al `ReplicaSet` estable (versión anterior).
+2. **Ejecución de los Pasos (steps):** El comportamiento se define mediante una secuencia de pasos en el YAML del `Rollout`. Por ejemplo:
+	 - **Paso 1:** Envía el 10% del tráfico al canario (`setWeight: 10`).
+	 - **Paso 2:** Pausa el despliegue durante 10 minutos (`pause: {duration: 10m}`) o de forma indefinida hasta una aprobación manual.
+	 - **Paso 3:** Si todo está bien, sube al 50% del tráfico (`setWeight: 50`).
+3. **Análisis Automatizado (`AnalysisTemplates`):** Esta es la magia de Argo. En lugar de uno tener que mirar los gráficos manualmente, se configura un `AnalysisRun` que hace consultas automáticas a sistemas como Prometheus o Datadog. Evalúa en tiempo real si el porcentaje de errores del canario aumenta o si la latencia se dispara.
+4. **Promoción o Rollback Automático:**
+	 - **Éxito:** Si el análisis pasa con éxito todos los pasos, Argo Rollouts escala la nueva versión al 100%, la convierte en la versión estable, y destruye los pods viejos.
+	 - **Fallo (Rollback):** Si las métricas de Prometheus devuelven errores que superan el límite definido, Argo aborta el despliegue inmediatamente, regresa el 100% del tráfico a la versión estable y apaga los pods del canario. El impacto para los usuarios es casi nulo.
+
+**El Secreto de esto es la Gestión del Tráfico:** Para que Argo Rollouts cambie con exactitud los porcentajes de tráfico (como un 10% exacto), se integra con controladores de Ingress o Service Meshes. De este modo, el Rollout modifica dinámicamente las reglas de herramientas como Istio, NGINX Ingress, Traefik, Gateway API, etc., para redirigir los paquetes de red correspondientes hacia el servicio estable o el servicio canario.
+
+
+### Ejecución de la Prueba Canary
+
+Como vimos, un despliegue canary consiste en ir asignando gradualmente tráfico a las nuevas instancias, así pues, configuramos nuestro manifiesto de la siguiente forma:
+
+- Levantamos 5 instancias.
+- Al hacer el rollout de la nueva versión, pasamos automáticamente el 20% del tráfico (lo correspondiente a 1 instancia), y lo dejamos así indefinidamente así esperando a una señal manual para continuar con el resto de instancias.
+- Después ejecutamos la promoción del siguiente tramo, que en nuestro caso, lo configuramos para que sea un switcheo del 20% del tráfico cada 30 segundos.
+
+Primero que nada, editamos nuestro archivo `hosts` (`sudo nano /etc/hosts`), y agregamos al final la línea `192.168.0.70  canary-demo.eljavatar.home`; esto lo hacemos para no tener que abrir túneles, ya que cuando se ejecuta un `kubectl port-forward`, cada vez que se establece una nueva conexión TCP desde la máquina local, `kubectl` consulta los Pods activos del servicio y selecciona uno solo usando un algoritmo de Round-Robin (aleatorio), lo cual no nos permitiría ver en tiempo real en una misma ventana del navegador el switcheo de tráfico entre ambas versiones.
+
+A diferencia de nuestra prueba de BlueGreen donde teníamos 2 `Service` distintos y podíamos ejecutar un `port-forward` por cada uno, el Canary suele trabajar con un solo `Service` (aunque también podríamos configurar 2), y es el balanceador (en nuestro caso el Gateway API junto con Cilium) el que se encarga de distribuir el tráfico basándose en pesos.
+
+Es por eso que para este ejemplo es más práctico configurar un `HTTPRoute`, ya que aunque el navegador use una sola conexión TCP contra Cilium, este se encarga de inspeccionar cada petición HTTP individual y, gracias a eBPF/Envoy, decide activamente: *"Esta petición va para el 80% (Azul) y esta otra va para el 20% (Amarillo)"*, logrando romper la persistencia de la conexión que imponen las peticiones a través de un túnel y mostrando el switcheo en tiempo real.
+
+Así pues, procedemos con los siguientes pasos:
+
+1. Ejecutar la primera versión (en la primera ventana de terminal):
+   ```sh
+   kubectl apply -f tests/argorollouts-canary-demo.yaml
+   ```
+
+2. Aquí vamos a abrir 1 ventana de terminal adicional y 2 ventanas del navegador, de modo tal que tendremos lo siguiente en cada una de ellas (lo ideal es organizarlas de modo tal que las podamos ver todas al mismo tiempo):
+   - **Terminal 1:** Es la que ya tenemos abierta actualmente, y es donde vamos a estar ejecutando los comandos en los próximos pasos.
+   - **Terminal 2:** Ejecutamos `kubectl argo rollouts get rollout -n canary-demo rollout-canary --watch` para monitorear las versiones; podemos ver que hay una revisión (la 1) con estado `stable` y los 5 pods.
+   - **Ventana de Navegador 1:** Entramos a `https://argorollouts.eljavatar.home/rollouts` para monitorear las versiones, pero esta vez desde el navegador; debemos asegurarnos de seleccionar el namespace `canary-demo` en la esquina superior derecha; aquí veremos que hay activas 5 instancias (pods) de una versión (Revisión 1).
+   - **Ventana de Navegador 2:** Entramos a `http://canary-demo.eljavatar.home` para monitorear el tráfico de la versiones (debemos Confirmar cunado nos aparezca la advertencia de Conexión no segura); en este momento veremos solo cuadros azules, ya que todos los pods están corriendo la misma versión actual.
+
+3. En la Terminal 1, ejecutar el rollout de la nueva versión: (podríamos hacerlo modificando el manifiesto (que es lo que normalmente haríamos en producción), pero el plugin de Argo Rollouts nos brinda una forma sencilla de hacerlo para pruebas rápidas sin tener que actualizar el manifiesto):
+   ```sh
+   kubectl argo rollouts set image -n canary-demo rollout-canary rollouts-demo=argoproj/rollouts-demo:yellow
+   ```
+
+   Nuestro manifiesto indica que se va a switchear automáticamente el 20% del tráfico a la nueva versión, por lo tanto, en este momento veremos lo siguiente:
+
+   - **Terminal 2:** Veremos que se crea una nueva revisión (la 2) con un solo pod (el 20% del total de nuestros 5 pods), y queda en estado `canary`, mientras que la otra revisión (la 1) aún sigue en estado `stable`, pero ahora solo con 5 pods.
+   - **Ventana de Navegador 1:** Veremos que se crea una nueva revisión (la 2), en la cual se muestra una sola instancia activa, mientras que en la revisión previa (la 1), ahora solo muestra 4 instancias activas.
+   - **Ventana de Navegador 2:** Aquí empezaremos a ver cuadros amarillos, pero si nos quedamos un rato viendo detalladamente, podemos apreciar que solamente un 20% del total de cuadros son amarillos, lo que indica que en efecto, solo el 20% del tráfico está llegando a la nueva versión. 
+
+4. En la Terminal 1, ejecutar el siguiente comando para switchear el resto del tráfico la nueva versión:
+   ```sh
+   kubectl argo rollouts promote -n canary-demo rollout-canary
+   ```
+
+   Después de ejecutar este comando veremos lo siguiente:
+
+   - **Terminal 2**: A la revisión nueva (la 2) que está en estado `canary` se empezará a agregarse un nuevo pod cada 30 segundos, mientras que la versión anterior, aunque sigue en estado `stable`, irá reduciendo sus pods cada 30 segundos; al finalizar el switcheo de todo el tráfico, la nueva revisión (la 2) pasará de `canary` a `active`, mientras que la revisión anterior (la 1), quedará con estado `ScaledDown` (sin instancias activas).
+   - **Ventana de Navegador 1:** Se muestra que se desescalan las instancias de la revisión 1 cada 30 segundos hasta quedar sin ninguna instancia activa, mientras que a la revisión 2 se va sumando una instancia activa cada 30 segundos hasta quedar con 5 instancias.
+   - **Ventana de Navegador 2:** Empezaremos a ver que cada 30 segundos van apareciendo más cuadros amarillos (sumando de a 20% cada 30 segundos), mientras que al mismo tiempo van desapareciendo los cuadros azules, lo que confirma que el nuevo tráfico empieza a llegar gradualmente a la nueva versión.
+
+   **Nota:** Un despliegue canary consiste en monitorear cómo se comporta una aplicación con una nueva versión, pero solo con una pequeña parte del tráfico antes de exponerla al total de usuarios. Por lo tanto, si después de monitorear el primer porcentaje de tráfico (20% en nuestro ejemplo) vemos que hay errores y queremos abortar el despliegue, ejecutamos el siguiente comando, el cual crea de nuevo los pods faltantes en la versión anterior (1 en nuestro ejemplo) y hace que el total del tráfico se dirija a dicha versión, desescalando todos los pods de la versión canary:
+   ```sh
+   kubectl argo rollouts abort -n canary-demo rollout-canary
+   ```
+
+5. Al finalizar la prueba podemos simplemente eliminar el namespace:
+   ```sh
+   kubectl delete ns canary-demo
+   ```
 
 

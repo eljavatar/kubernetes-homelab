@@ -1,0 +1,124 @@
+# Default values: https://artifacthub.io/packages/helm/argo/argo-rollouts/2.43.6?modal=values
+# Chart: 2.43.6  |  App Version: v1.10.0
+# Docs: https://argo-rollouts.readthedocs.io/
+
+# 1. CRDs: instalación automática y conservación al desinstalar el chart
+installCRDs: true
+keepCRDs: true
+
+# 2. Alcance del controlador: un único controlador que observa todo el clúster
+# (para modo namespaced habría que usar clusterInstall: false)
+clusterInstall: true
+createClusterAggregateRoles: true
+
+# 3. RBAC de proveedores de tráfico: habilitamos explícitamente el provider de Gateway API
+# (por defecto ya viene en true, lo dejamos explícito para documentarlo)
+providerRBAC:
+  enabled: true
+  providers:
+    gatewayAPI: true
+
+# 4. Controlador en Alta Disponibilidad (2 réplicas con leader election) + PodDisruptionBudget
+controller:
+  replicas: 2
+  createClusterRole: true
+
+  metrics:
+    enabled: true
+    service:
+      port: 8090
+    serviceMonitor:
+      enabled: false   # No hay kube-prometheus-stack; exponemos /metrics igualmente
+
+  # Distribución en las Mini PCs usando los custom-role del repositorio
+  nodeSelector: {}
+  tolerations: []
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: custom-role
+                operator: In
+                values:
+                  - "ops"
+                  - "apps"
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - argo-rollouts
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  pdb:
+    enabled: true
+    minAvailable: 1   # GARANTÍA: Al menos 1 pod de Argo-Rollout DEBE estar respondiendo peticiones siempre
+
+# 5. Dashboard en modo SOLO LECTURA, accesible solo dentro del clúster (ClusterIP:3100)
+# Para exponerlo con el Gateway API existente usar dashboard.httproute (ver README)
+dashboard:
+  enabled: true
+  readonly: true
+  replicas: 1
+
+  nodeSelector:
+    custom-role: "ops"
+
+  service:
+    type: ClusterIP
+    port: 3100
+    targetPort: 3100
+  
+  httproute:
+    # -- Enable HTTPRoute resource for the dashboard (Gateway API)
+    enabled: true
+    # -- Gateway API parentRefs for the HTTPRoute
+    ## Must reference an existing Gateway
+    parentRefs:
+      - name: external-gateway
+        namespace: gateway-api-system # Namespace donde está el Gateway
+        sectionName: https-local
+    # -- List of hostnames for the HTTPRoute
+    hostnames:
+      - "argorollouts.eljavatar.home"
+    # -- HTTPRoute rules configuration
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        # filters: []
+        #   - type: RequestHeaderModifier
+        #     requestHeaderModifier:
+        #       add:
+        #         - name: X-Custom-Header
+        #           value: custom-value
+        # timeouts: {}
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# 6. Notificaciones deshabilitadas (no crea ConfigMap/Secret adicionales)
+notifications:
+  configmap:
+    create: false
+  secret:
+    create: false

@@ -32,8 +32,11 @@ reloader:
   # con Argo Rollout en Reloader:
   # https://docs.stakater.com/reloader/1.4/how-to-guides/use-reloader-with-argocd.html#using-argo-rollouts
   # https://argoproj.github.io/rollouts/
-  # Por el momento lo dejamos deshabilitado
-  isArgoRollouts: false
+  # Por defecto (false), Reloader solo sabe vigilar y aplicar reinicios automáticos a los recursos estándar
+  # de Kubernetes: Deployments, DaemonSets y StatefulSets. Si cambiamos un ConfigMap o un Secret, Reloader
+  # busca estos componentes tradicionales para aplicarles un rolling update. Al activar la opción en true,
+  # Reloader aprende a "hablar" el idioma de Argo y añade el recurso Rollout a su lista de vigilancia.
+  isArgoRollouts: true
 
   deployment:
     replicas: 1

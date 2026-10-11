@@ -1,0 +1,28 @@
+# Dependencies & Infrastructure Artifacts
+node_modules/
+.terraform/
+.terraform.lock.hcl
+*.kubeconfig
+*.tfstate
+*.tfstate.*
+
+# Talos
+talos/talosconfig
+talos/controlplane.yaml
+talos/worker.yaml
+talos/configs
+talos/configs/*
+
+# Build Outputs & Binarios
+target/
+bin/
+obj/
+dist/
+build/
+
+# Secrets & Local Env (Protección)
+.env
+.env.*
+*.pem
+secrets/
+/certs

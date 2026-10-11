@@ -88,9 +88,9 @@ spec:
     - "api.eljavatar.org"
   rules:
     - matches:
-      - path:
-          type: PathPrefix
-          value: /
+        - path:
+            type: PathPrefix
+            value: /
       backendRefs:
         - name: playground-nginx-service # Service de Kubernetes normal (ClusterIP)
           port: 80 # El puerto en texto plano del contenedor/servicio

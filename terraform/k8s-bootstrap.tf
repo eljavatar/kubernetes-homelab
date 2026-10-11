@@ -768,6 +768,27 @@ resource "kubectl_manifest" "vso_vault_auth_global" {
 
 
 
+# Instalación de Argo Rollouts
+resource "helm_release" "argo_rollouts" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "argo-rollouts"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-rollouts"
+  version          = "2.43.6"
+  namespace        = "argo-rollouts"
+  create_namespace = true
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/argo-rollouts-values.yaml")
+  ]
+
+  depends_on = [kubectl_manifest.vso_vault_auth_global]
+}
+
+
+
 # Instalación de Reloader
 resource "helm_release" "reloader" {
   count            = var.auto_config_cluster ? 1 : 0
@@ -784,7 +805,7 @@ resource "helm_release" "reloader" {
     file("${local.k8s_path}/deployments/reloader-values.yaml")
   ]
 
-  depends_on = [kubectl_manifest.vso_vault_auth_global]
+  depends_on = [helm_release.argo_rollouts]
 }
 
 
