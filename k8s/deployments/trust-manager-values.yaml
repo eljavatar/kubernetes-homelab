@@ -23,7 +23,8 @@ secretTargets:
 # Asignación al nodo de operaciones (Ops)
 nodeSelector:
   #node-role.kubernetes.io/ops: "true"
-  kubernetes.io/hostname: "worker-ops-02"
+  # kubernetes.io/hostname: "worker-ops-02"
+  custom-role: "ops"
 
 resources:
   requests:

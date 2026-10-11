@@ -16,7 +16,8 @@ operator:
   replicas: 1
   nodeSelector:
     kubernetes.io/os: linux
-    kubernetes.io/hostname: "worker-ops-02"
+    # kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
   prometheus:
     enabled: true # Salen por el puerto 9963
     serviceMonitor:
@@ -142,7 +143,8 @@ hubble:
     replicas: 1
     # Forzar a Hubble Relay a correr en el nodo de Ops
     nodeSelector:
-      kubernetes.io/hostname: "worker-ops-02"
+      # kubernetes.io/hostname: "worker-ops-02"
+      custom-role: "ops"
     prometheus:
       enabled: true # Sale por el puerto 9966
       serviceMonitor:
@@ -159,7 +161,8 @@ hubble:
     replicas: 1
     # Forzar a Hubble UI (la interfaz gráfica) a correr en el nodo de Ops
     nodeSelector:
-      kubernetes.io/hostname: "worker-ops-02"
+      # kubernetes.io/hostname: "worker-ops-02"
+      custom-role: "ops"
     backend:
       resources:
         limits:

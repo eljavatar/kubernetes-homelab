@@ -3377,6 +3377,43 @@ Para no tener que usar comandos de terminal y poder visualizar dashboards reales
 Dependiendo de la herramienta de observabilidad que se desee implementar, la pieza encargada de automatizar esta recolección puede variar, por ejemplo, para el caso del stack de VictoriaMetrics la herramienta sería *VMAgent*, o para el caso del stack LGTMP de grafana (Loki, Grafana, Tempo, Mimir, Pyroscope) la herramienta sería *Alloy*.
 
 
+### OpenFeature Operator
+
+El **OpenFeature Operator** (OFO) es un operador nativo de Kubernetes que expone banderas de funcionalidad (*feature flags*) a las aplicaciones. Su modo de funcionamiento consiste en inyectar un sidecar de **flagd** en los pods etiquetados, de modo que la aplicación pueda evaluar las banderas localmente por gRPC/HTTP sin acoplarse a un SDK externo. Los CRDs `FeatureFlag` y `FeatureFlagSource` definen las banderas y su origen de sincronización (Kubernetes, ficheros, HTTP, S3, etc.).
+
+Para este homelab se instala el chart `open-feature-operator` con los CRDs gestionados por el propio chart (son plantillas que Helm aplica automáticamente), una única réplica del controlador (para garantizar un solo reconciliador activo) y métricas expuestas de forma segura mediante `kube-rbac-proxy`, evitando cualquier dependencia del Prometheus Operator (dado que la observabilidad se hará con VictoriaMetrics y OpenObserve).
+
+> **Prerequisito:** el OpenFeature Operator requiere **cert-manager** en el clúster (ya instalado en secciones anteriores) para la gestión de los certificados del webhook de admisión.
+
+Para instalarlo ejecutamos lo siguiente:
+
+```sh
+# Agregamos el repositorio
+helm repo add openfeature https://open-feature.github.io/open-feature-operator/
+helm repo update
+
+# Instalamos (Chart v0.9.3 -> App v0.9.3)
+helm upgrade --install open-feature-operator openfeature/open-feature-operator --version 0.9.3 \
+  -n open-feature-operator-system --create-namespace \
+  -f k8s/deployments/open-feature-values.yaml
+```
+
+Para validar la instalación:
+
+```sh
+# Controlador
+kubectl get -n open-feature-operator-system deployment -o wide
+kubectl get -n open-feature-operator-system pods -o wide
+
+# CRDs registrados
+kubectl get crds | grep openfeature.dev
+```
+
+> **Métricas sin CRDs de Prometheus:** el chart no crea `ServiceMonitor`/`PodMonitor`; el manager publica sus métricas en `127.0.0.1:8080` y `kube-rbac-proxy` las sirve de forma autenticada en el puerto `8443`. Cuando se despliegue VictoriaMetrics, se podrá añadir un `VMServiceScrape` (CRD del VictoriaMetrics Operator) para recolectarlas sin depender del Prometheus Operator.
+
+> **Activación por aplicación:** para inyectar el sidecar `flagd` en un pod basta con anotar su Deployment con `openfeature.dev/enabled: "true"` y referenciar la `FeatureFlagSource` correspondiente.
+
+
 ### Herramientas de Administración del Clúster de Kubernetes
 
 En esta pequeña sección, no voy a ahondar mucho en el tema, sin embargo, dejaré un breve resumen sobre algunas herramientas sobre las que he indagado.

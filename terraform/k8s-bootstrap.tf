@@ -850,4 +850,30 @@ resource "helm_release" "metrics_server" {
   depends_on = [helm_release.descheduler]
 }
 
+
+
+# Instalación del OpenFeature Operator
+# Requiere cert-manager (ya instalado) para los certificados del webhook de admisión
+resource "helm_release" "open_feature_operator" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "open-feature-operator"
+  repository       = "https://open-feature.github.io/open-feature-operator"
+  chart            = "open-feature-operator"
+  version          = "0.9.3"
+  namespace        = "open-feature-operator-system"
+  create_namespace = true
+
+  wait          = true
+  wait_for_jobs = false
+  timeout       = 300
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/open-feature-values.yaml")
+  ]
+
+  depends_on = [helm_release.cert_manager, helm_release.metrics_server]
+}
+
 ### END: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento)

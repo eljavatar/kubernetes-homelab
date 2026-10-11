@@ -55,7 +55,8 @@ spec:
           # de fallo en todos los reintentos, Kubernetes tiende a eliminar el pod después del último reintento
           restartPolicy: Never
           nodeSelector:
-            kubernetes.io/hostname: "worker-ops-02"
+            # kubernetes.io/hostname: "worker-ops-02"
+            custom-role: "ops"
           containers:
             - name: syncer
               image: alpine/kubectl:1.36.0 # Imagen liviana oficial con kubectl

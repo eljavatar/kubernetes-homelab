@@ -13,7 +13,8 @@ extraArgs:
   - --enable-gateway-api
 
 nodeSelector:
-  kubernetes.io/hostname: "worker-ops-02"
+  # kubernetes.io/hostname: "worker-ops-02"
+  custom-role: "ops"
 
 resources:
   requests:
@@ -43,7 +44,8 @@ prometheus:
 
 webhook:
   nodeSelector:
-    kubernetes.io/hostname: "worker-ops-02"
+    # kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
   resources:
     requests:
       cpu: 30m
@@ -54,7 +56,8 @@ webhook:
 
 cainjector:
   nodeSelector:
-    kubernetes.io/hostname: "worker-ops-02"
+    # kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
   resources:
     requests:
       cpu: 30m

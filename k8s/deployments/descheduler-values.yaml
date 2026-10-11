@@ -4,7 +4,8 @@
 kind: Deployment
 
 nodeSelector:
-  kubernetes.io/hostname: "worker-ops-02"
+  # kubernetes.io/hostname: "worker-ops-02"
+  custom-role: "ops"
 
 # Required when running as a Deployment
 deschedulingInterval: "5m" # Evalúa el balanceo del clúster cada 5 minutos

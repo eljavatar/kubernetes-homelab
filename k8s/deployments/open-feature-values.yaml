@@ -1,0 +1,86 @@
+# Default values: https://artifacthub.io/packages/helm/open-feature-operator/open-feature-operator/0.9.3?modal=values
+# Chart: 0.9.3 (publicado como v0.9.3)  |  App Version: v0.9.3
+# Repo: https://open-feature.github.io/open-feature-operator/
+# Prerequisito: cert-manager (ya instalado en el clúster)
+
+# 1. Namespace: lo crea Terraform (create_namespace = true), por lo que el chart
+#    no debe crearlo para evitar conflictos de ownership.
+defaultNamespace: open-feature-operator-system
+namespace:
+  create: false
+  labels: {}
+  annotations: {}
+
+# 2. Etiquetas/anotaciones globales de los pods del operador
+labels: {}
+annotations: {}
+
+# 3. Webhook mutante: no bloquea la creación de pods si el webhook no responde
+mutatingWebhook:
+  failurePolicy: Ignore
+
+# 4. Controlador (manager): 1 réplica para asegurar un único reconciliador activo.
+#    No se escala a 2 salvo que se verifique leader election
+#    (kubectl get lease -n open-feature-operator-system).
+controllerManager:
+  replicas: 1
+  manager:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi
+
+# 5. Config del manager: validación de CRDs + métricas.
+#    VictoriaMetrics/OpenObserve (sin CRDs de Prometheus):
+#    el chart NO crea ServiceMonitor/PodMonitor. El manager expone /metrics en
+#    127.0.0.1:8080 y kube-rbac-proxy lo sirve de forma autenticada en 8443.
+#    VictoriaMetrics podrá recolectarlo luego con un VMServiceScrape (su propio CRD).
+managerConfig:
+  flagsValidationEnabled: "true"
+  controllerManagerConfigYaml:
+    health:
+      healthProbeBindAddress: ":8081"
+    metrics:
+      bindAddress: 127.0.0.1
+      bindPort: 8080
+    webhook:
+      port: 9443
+
+# 6. flagd-proxy: solo se usa con defaultSyncProvider = flagd-proxy.
+#    Como usamos el sync-provider 'kubernetes', se mantiene en 1 réplica.
+flagdProxyConfiguration:
+  replicaCount: 1
+  debugLogging: false
+
+# 7. Sidecar flagd inyectado en los pods etiquetados
+sidecarConfiguration:
+  port: 8013
+  managementPort: 8014
+  defaultSyncProvider: kubernetes
+  evaluator: json
+  logFormat: json
+  probesEnabled: true
+  debugLogging: false
+  otelCollectorUri: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 64Mi
+
+# 8. Modelo in-process (evaluación dentro del propio pod)
+inProcessConfiguration:
+  port: 8015
+  host: "localhost"
+  tls: "false"
+  envVarPrefix: FLAGD
+  cache:
+    type: lru
+    size: 1000

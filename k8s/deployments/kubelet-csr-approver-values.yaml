@@ -19,7 +19,8 @@ bypassDnsResolution: true
 
 replicas: 1
 nodeSelector:
-  kubernetes.io/hostname: "worker-ops-02"
+  # kubernetes.io/hostname: "worker-ops-02"
+  custom-role: "ops"
 
 # Configuración de recursos para producción
 resources:

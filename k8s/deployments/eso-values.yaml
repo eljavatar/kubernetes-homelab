@@ -3,7 +3,8 @@
 installCRDs: true
 
 nodeSelector:
-  kubernetes.io/hostname: "worker-ops-02"
+  # kubernetes.io/hostname: "worker-ops-02"
+  custom-role: "ops"
 
 serviceMonitor:
   enabled: false
@@ -16,7 +17,8 @@ metrics:
 
 webhook:
   nodeSelector:
-    kubernetes.io/hostname: "worker-ops-02"
+    # kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
   metrics:
     service:
       enabled: true
@@ -30,7 +32,8 @@ webhook:
 
 certController:
   nodeSelector:
-    kubernetes.io/hostname: "worker-ops-02"
+    # kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
   metrics:
     service:
       enabled: true

@@ -42,7 +42,8 @@ reloader:
     replicas: 1
 
     nodeSelector:
-      kubernetes.io/hostname: "worker-ops-02"
+      # kubernetes.io/hostname: "worker-ops-02"
+      custom-role: "ops"
     
     resources:
       requests:
