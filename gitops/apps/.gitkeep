@@ -1,0 +1,5 @@
+# Este archivo mantiene versionada la carpeta gitops/apps mientras no existan
+# Applications declaradas (Git no versiona directorios vacíos).
+# Argo CD valida que el 'source.path' de la Application raíz exista en el commit,
+# por lo que sin este archivo aparece: "gitops/apps: app path does not exist".
+# Puede eliminarse cuando haya al menos un gitops/apps/<componente>/application.yaml.
