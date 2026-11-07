@@ -1,0 +1,41 @@
+# AppProject que delimita qué repositorios y destinos pueden usar las Applications
+# del Homelab. A diferencia de las credenciales, este recurso NO es un secreto y
+# se versiona en Git.
+#
+# IMPORTANTE: con el patrón de múltiples "sources" (chart de Helm + valueFiles del
+# repositorio), TODOS los repositorios de charts deben estar autorizados en
+# 'sourceRepos'; de lo contrario las Applications quedan en estado InvalidSpecError.
+#
+# Se aplica UNA sola vez (antes de la Application raíz):
+#   kubectl apply -f gitops/projects/homelab-platform.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: homelab-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Componentes de plataforma del Homelab
+  sourceRepos:
+    # Repositorio GitOps propio (Application raíz, valueFiles, manifiestos)
+    - https://github.com/eljavatar/kubernetes-homelab
+    # Repositorios de charts usados por los componentes de plataforma
+    - https://kubernetes-sigs.github.io/descheduler/
+    - https://kubernetes-sigs.github.io/metrics-server/
+    - https://open-feature.github.io/open-feature-operator
+    - https://argoproj.github.io/argo-helm
+    - https://charts.jetstack.io
+    - https://openebs.github.io/openebs
+    # NOTA: si se prefiere no mantener la lista a mano, se puede usar el comodín:
+    # - "*"
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+  # Recursos de ámbito de clúster necesarios (CRDs, ClusterIssuer, StorageClass, etc.)
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

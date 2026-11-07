@@ -1,0 +1,235 @@
+# Default values: https://artifacthub.io/packages/helm/argo/argo-cd/10.10.5?modal=values
+# Chart: 10.10.5  |  App Version: v3.5.5  |  kubeVersion: ">=1.25.0-0"
+# Docs: https://argo-cd.readthedocs.io/en/stable/
+#
+# IMPORTANTE: este archivo NO contiene credenciales.
+# El hash bcrypt del usuario 'admin' (configs.secret.argocdServerAdminPassword) se
+# inyecta en tiempo de instalación desde Vault, ya sea con el bloque
+# 'set_sensitive' de Terraform o con '--set-string' en Helm.
+# Ver README > Instalación de Componentes utilitarios > Argo CD.
+
+# 1. CRDs del ecosistema Argo (Application, ApplicationSet, AppProject, etc.)
+# 'keep: true' evita que un 'helm uninstall' borre los CRDs (y con ellos las Applications)
+crds:
+  install: true
+  keep: true
+
+# 2. Configuración global: dominio, colocación y métricas
+global:
+  # Dominio por defecto de los recursos del chart (routes, SSO, notificaciones)
+  domain: argocd.eljavatar.home
+
+  # Todos los componentes (server, controller, repoServer, applicationSet, redis)
+  # heredan este nodeSelector, ya que su valor por defecto es global.nodeSelector.
+  # Se apunta al nodo de operaciones, donde ya viven cert-manager, ESO, VSO, Cilium
+  # operator, etc. Al agregar la tercera Mini PC solo se cambia esta etiqueta.
+  nodeSelector:
+    kubernetes.io/os: linux
+    # Para fijarlo a un nodo concreto: kubernetes.io/hostname: "worker-ops-02"
+    custom-role: "ops"
+
+  logging:
+    format: json
+    level: info
+
+  # Añade anotaciones prometheus.io/* a los Services de métricas para que
+  # VictoriaMetrics los descubra sin necesidad de los CRDs de Prometheus Operator
+  addPrometheusAnnotations: true
+
+# 3. argocd-cm / argocd-params-cm
+configs:
+  cm:
+    # URL con la que Argo CD se identifica (coincide con el hostname del HTTPRoute)
+    url: https://argocd.eljavatar.home
+    admin.enabled: true
+    # Clave de tracking de recursos (evita colisiones entre Applications)
+    application.instanceLabelKey: argocd.argoproj.io/instance
+    # Refresco del repositorio Git cada 2 minutos (+ jitter de hasta 60s, por lo que el
+    # intervalo real queda entre 2 y 3 minutos). El default de Argo CD es 120s con
+    # jitter de 60s; se baja respecto a 180s para tener feedback más rápido al aprender.
+    # Para producción con muchas Applications conviene subirlo a 300s.
+    timeout.reconciliation: 120s
+    timeout.reconciliation.jitter: 60s
+    # Cuando se integre Keycloak por OIDC (Argo CD 3.x ya no necesita Dex).
+    # El clientSecret se puede referenciar desde Vault/SealedSecret en lugar de quemarlo aquí:
+    # oidc.config: |
+    #   name: Keycloak
+    #   issuer: https://auth.eljavatar.home/realms/eljavatar
+    #   clientID: argocd
+    #   clientSecret: $oidc.keycloak.clientSecret
+    #   requestedScopes: ["openid", "profile", "email", "groups"]
+
+  params:
+    # El TLS lo termina el Gateway de Cilium, que no soporta BackendTLSPolicy,
+    # por lo que el backend de argocd-server debe hablar HTTP plano dentro del clúster
+    server.insecure: true
+    # 1 sola réplica: limitamos los procesadores para no saturar una VM de 6 vCPU
+    controller.status.processors: 10
+    controller.operation.processors: 5
+    # Evita picos de RAM en el repo-server al renderizar muchos manifiestos
+    reposerver.parallelism.limit: 4
+    # Permite sync progresivo en ApplicationSet (útil para pipelines de instalación)
+    applicationsetcontroller.enable.progressive.syncs: true
+    # Descomentar si se quiere restringir el namespace donde se buscan Applications:
+    # application.namespaces: "argocd"
+
+  # NO declaramos credenciales de repositorios aquí (quedarían en Git).
+  # Alternativa recomendada: un Secret 'argocd-repo-creds' con la label
+  # argocd.argoproj.io/secret-type: repo-creds gestionado por VSO desde Vault.
+  # Ver README > Configurar repositorios y proyectos de GitHub.
+  repositories: {}
+  credentialTemplates: {}
+
+  secret:
+    # El chart sigue creando argocd-secret; el hash bcrypt del admin
+    # (argocdServerAdminPassword) se inyecta con --set-string o set_sensitive
+    createSecret: true
+    # argocdServerAdminPassword: ""       # <- se inyecta desde Vault, NO en Git
+    # argocdServerAdminPasswordMtime: ""  # <- se inyecta junto con el hash
+
+# 4. Servidor de la API/UI
+server:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  service:
+    # Puerto estándar del navegador (HTTP/1.1 + gRPC-web) y puerto HTTPS del Service
+    servicePortHttp: 80
+    servicePortHttps: 443
+    # Puerto adicional del Service para gRPC nativo. En el pod apunta al mismo
+    # containerPort (8080); aquí lo que se declara es el protocolo h2c.
+    # Solo se renderiza cuando configs.params."server.insecure" es true.
+    servicePortHttp2: 8080
+    # Sin esto, Cilium/Envoy hablan HTTP/1.1 con el backend y el CLI recibe 404.
+    # Cilium lee este appProtocol porque gatewayAPI.enableAppProtocol=true.
+    servicePortHttp2AppProtocol: kubernetes.io/h2c
+
+  metrics:
+    enabled: true          # Service de métricas (/metrics en el puerto 8083)
+    serviceMonitor:
+      enabled: false       # No usamos el operador de Prometheus
+
+  # Exposición vía Gateway API (mismo patrón que argo-rollouts-values.yaml)
+  # El navegador usa esta ruta: backend HTTP/1.1 en el puerto 80 del Service
+  httproute:
+    enabled: true
+    parentRefs:
+      - name: external-gateway
+        namespace: gateway-api-system # Namespace donde está el Gateway
+        sectionName: https-local
+    hostnames:
+      - "argocd.eljavatar.home"
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+
+  # gRPC nativo para el CLI de Argo CD.
+  #
+  # ¿Por qué un hostname distinto al de la UI? Porque Cilium coloca la HTTPRoute
+  # catch-all (prefix: / -> puerto 80) ANTES que la GRPCRoute dentro del mismo
+  # virtualHost de Envoy, y Envoy usa la primera coincidencia: el tráfico gRPC
+  # terminaría en el puerto HTTP/1.1 y recibiría "404 page not found".
+  # Con un hostname propio, el virtualHost solo contiene la ruta al puerto h2c.
+  #
+  # Debe ser un subdominio de UN solo nivel para que intersecte con el listener
+  # '*.eljavatar.home' del Gateway y con el certificado wildcard.
+  grpcroute:
+    enabled: true
+    parentRefs:
+      - name: external-gateway
+        namespace: gateway-api-system
+        sectionName: https-local
+    hostnames:
+      - "argocd-grpc.eljavatar.home"
+    rules:
+      # Un rule sin 'matches' enruta todo el tráfico gRPC de ese hostname al puerto h2c.
+      # En GRPCRoute no se usan 'path' ni se filtra por la cabecera Content-Type: el
+      # emparejamiento ya es de tráfico gRPC sobre ese hostname.
+      - {}
+
+# 5. Controlador de aplicaciones (el componente más pesado del chart)
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  metrics:
+    enabled: true          # Service de métricas (puerto 8082)
+    serviceMonitor:
+      enabled: false
+
+# 6. Repo server: clona los repositorios y renderiza Helm/Kustomize/plugins
+# (se ejecuta en un contenedor separado del controller por seguridad)
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+  metrics:
+    enabled: true          # Service de métricas (puerto 8084)
+    serviceMonitor:
+      enabled: false
+
+# 7. ApplicationSet controller: generadores (list, git, cluster) para no crear
+# N Applications a mano cuando se instalen los demás componentes
+applicationSet:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+# 8. Componentes prescindibles en el homelab (ahorro de CPU/RAM)
+notifications:
+  enabled: false      # Sin Slack/Teams/Webhooks por ahora (~30-50Mi)
+dex:
+  enabled: false      # Sin SSO por ahora; a futuro OIDC nativo con Keycloak (~30Mi)
+
+# 9. Redis embebido (caché compartida entre server, controller y repo-server)
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# 10. HA de Redis: descartado porque exige al menos 3 workers (anti-affinity obligatorio)
+redis-ha:
+  enabled: false
+
+# 11. Job que inicializa el password de Redis (se ejecuta una sola vez)
+redisSecretInit:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
