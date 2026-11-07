@@ -19,7 +19,7 @@ spec:
     # Terraform REEMPLAZA este valor por 'var.gitops_branch' al aplicar el manifiesto
     # (main en producción, test/<tema> durante las pruebas). Se deja 'main' como valor
     # por defecto para aplicaciones manuales con kubectl.
-    targetRevision: test/gitops-bootstrap #main
+    targetRevision: main # test/gitops-bootstrap
     path: gitops/apps
     directory:
       # Entra en las subcarpetas (gitops/apps/<componente>/)
