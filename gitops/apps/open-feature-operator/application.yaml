@@ -21,7 +21,7 @@ spec:
         valueFiles:
           - $values/k8s/deployments/open-feature-values.yaml
     - repoURL: https://github.com/eljavatar/kubernetes-homelab
-      targetRevision: main
+      targetRevision: test/gitops-bootstrap #main
       ref: values
   destination:
     server: https://kubernetes.default.svc
