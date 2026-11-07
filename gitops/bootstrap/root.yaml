@@ -24,8 +24,13 @@ spec:
     directory:
       # Entra en las subcarpetas (gitops/apps/<componente>/)
       recurse: true
-      # Evita intentar aplicar values.yaml, config.yaml u otros archivos auxiliares
-      include: 'application.yaml'
+      # Argo CD compara 'include' contra el path RELATIVO de cada archivo, así que
+      # 'application.yaml' (sin comodín) solo matchearía un archivo en la raíz de
+      # gitops/apps y root sincronizaría con 0 recursos.
+      # '*/application.yaml' matchea gitops/apps/<componente>/application.yaml y
+      # sigue excluyendo variantes como 'application2.yaml' (doble dueño con Terraform)
+      # y archivos auxiliares como .gitkeep, values.yaml o config.yaml.
+      include: '*/application.yaml'
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
