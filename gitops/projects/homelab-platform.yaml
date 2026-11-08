@@ -21,6 +21,7 @@ spec:
     # Repositorio GitOps propio (Application raíz, valueFiles, manifiestos)
     - https://github.com/eljavatar/kubernetes-homelab
     # Repositorios de charts usados por los componentes de plataforma
+    - https://argoproj.github.io/argo-helm
     - https://stakater.github.io/stakater-charts
     - https://kubernetes-sigs.github.io/descheduler/
     - https://kubernetes-sigs.github.io/metrics-server/

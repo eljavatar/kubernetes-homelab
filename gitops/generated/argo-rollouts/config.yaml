@@ -1,0 +1,7 @@
+name: argo-rollouts
+namespace: argo-rollouts
+chartRepo: https://argoproj.github.io/argo-helm
+chart: argo-rollouts
+chartVersion: 2.43.6
+valuesFile: k8s/deployments/argo-rollouts-values.yaml
+syncWave: "50"
