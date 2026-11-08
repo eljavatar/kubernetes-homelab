@@ -5,9 +5,9 @@
 #   2. Nuestro repositorio Git, referenciado con 'ref: values', del que se leen
 #      los valueFiles (los mismos que usa Terraform en k8s/deployments/).
 #
-# OJO: mientras este release siga siendo gestionado por Terraform
-# (terraform/k8s-bootstrap.tf), NO se debe crear esta Application para evitar
-# que dos dueños peleen por el mismo release de Helm.
+# OJO: si este release es gestionado por Terraform (terraform/k8s-bootstrap.tf),
+# NO se debe crear esta Application para evitar que dos dueños peleen por el
+# mismo release de Helm.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
