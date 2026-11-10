@@ -9,7 +9,9 @@ metadata:
   namespace: argocd
   annotations:
     # Después de los operadores base; el orden exacto depende de las dependencias reales
-    argocd.argoproj.io/sync-wave: "20"
+    argocd.argoproj.io/sync-wave: "30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: homelab-platform
   sources:

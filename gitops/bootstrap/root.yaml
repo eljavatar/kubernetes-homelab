@@ -42,7 +42,7 @@ spec:
   # cambiarlo a 'true' para que Git sea la única fuente de verdad (garbage collection).
   syncPolicy:
     automated:
-      prune: false
-      selfHeal: true
+      prune: false      # Borra recursos en K8s si se borran en Git
+      selfHeal: true    # Corrige (reconcilia con Git) cambios manuales hechos en el clúster
     syncOptions:
       - CreateNamespace=true

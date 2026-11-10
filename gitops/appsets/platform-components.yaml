@@ -9,7 +9,7 @@ spec:
   generators:
     - git:
         repoURL: https://github.com/eljavatar/kubernetes-homelab
-        revision: test/gitops-bootstrap #main
+        revision: main #test/gitops-bootstrap
         files:
           - path: gitops/generated/*/config.yaml
   template:

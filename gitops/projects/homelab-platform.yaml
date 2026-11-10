@@ -26,7 +26,6 @@ spec:
     - https://kubernetes-sigs.github.io/descheduler/
     - https://kubernetes-sigs.github.io/metrics-server/
     - https://open-feature.github.io/open-feature-operator
-    - https://argoproj.github.io/argo-helm
     - https://charts.jetstack.io
     - https://openebs.github.io/openebs
     # NOTA: si se prefiere no mantener la lista a mano, se puede usar el comodín:

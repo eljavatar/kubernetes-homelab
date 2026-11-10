@@ -10,8 +10,11 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: homelab-platform
+  # O solo source: en caso de ser un único source
   sources:
     - repoURL: https://open-feature.github.io/open-feature-operator
       chart: open-feature-operator
