@@ -22,7 +22,7 @@ spec:
       helm:
         releaseName: open-feature-operator
         valueFiles:
-          - $values/k8s/deployments/open-feature-values.yaml
+          - $values/k8s/bootstrap/deployments/open-feature-values.yaml
     - repoURL: https://github.com/eljavatar/kubernetes-homelab
       targetRevision: main # test/gitops-bootstrap
       ref: values

@@ -3,7 +3,7 @@
 # Patrón de múltiples "sources":
 #   1. El chart, servido por su repositorio Helm.
 #   2. Nuestro repositorio Git, referenciado con 'ref: values', del que se leen
-#      los valueFiles (los mismos que usa Terraform en k8s/deployments/).
+#      los valueFiles (los mismos que usa Terraform en k8s/bootstrap/deployments/).
 #
 # OJO: si este release es gestionado por Terraform (terraform/k8s-bootstrap.tf),
 # NO se debe crear esta Application para evitar que dos dueños peleen por el
@@ -27,7 +27,7 @@ spec:
       helm:
         releaseName: descheduler
         valueFiles:
-          - $values/k8s/deployments/descheduler-values.yaml
+          - $values/k8s/bootstrap/deployments/descheduler-values.yaml
     - repoURL: https://github.com/eljavatar/kubernetes-homelab
       targetRevision: main
       ref: values

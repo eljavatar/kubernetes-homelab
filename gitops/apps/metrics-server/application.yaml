@@ -21,7 +21,7 @@ spec:
       helm:
         releaseName: metrics-server
         valueFiles:
-          - $values/k8s/deployments/metrics-server-values.yaml
+          - $values/k8s/bootstrap/deployments/metrics-server-values.yaml
     - repoURL: https://github.com/eljavatar/kubernetes-homelab
       targetRevision: main
       ref: values

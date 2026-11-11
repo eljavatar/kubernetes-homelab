@@ -1,0 +1,3 @@
+Carpeta para manifiestos de aplicaciones (Keycloak, SeaweedFS, observabilidad...).
+Ver la seccion 'Estructura de carpetas del proyecto' del README: una carpeta por app,
+con values.yaml en la raiz y subcarpetas solo cuando hagan falta (manifests/, charts/, kustomize/).
