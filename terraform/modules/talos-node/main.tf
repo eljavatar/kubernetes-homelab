@@ -156,7 +156,8 @@ data "talos_machine_configuration" "this" {
         }
         # Control de Admisión Híbrido
         apiServer = {
-          # Configurammos el admisionControl de tal modo que si es un clúster de desarrollo, no tengamos que agregar el siguiente label a los namespaces:
+          # Configuramos el admissionControl de modo que un clúster de desarrollo no obligue a
+          # etiquetar a mano cada namespace con:
           # kubectl label namespace <nombre-namespace> pod-security.kubernetes.io/enforce=privileged --overwrite
           # https://docs.siderolabs.com/kubernetes-guides/security/pod-security#configuration
           admissionControl = [
@@ -166,17 +167,31 @@ data "talos_machine_configuration" "this" {
                 apiVersion = "pod-security.admission.config.k8s.io/v1"
                 kind       = "PodSecurityConfiguration"
                 defaults = {
+                  # 'enforce' es el ÚNICO modo que bloquea la creación de pods:
+                  # - is_development = true  -> privileged: no frena pruebas (Cilium, OpenEBS y
+                  #   'cilium connectivity test' necesitan capacidades privilegiadas).
+                  # - is_development = false -> baseline: bloquea privileged, hostPath y hostNetwork.
                   enforce         = var.is_development ? "privileged" : "baseline"
                   enforce-version = "latest"
-                  audit           = var.is_development ? "privileged" : "restricted"
-                  audit-version   = "latest"
-                  warn            = var.is_development ? "privileged" : "baseline"
-                  warn-version    = "latest"
+                  # 'audit' y 'warn' NO bloquean, así que se dejan SIEMPRE en restricted: en ambos
+                  # modos queda registro de qué workloads incumplirían el nivel estricto. Con
+                  # 'warn' en restricted se obtiene el "modo observación" recomendado por Kubernetes:
+                  # se ve en los avisos de kubectl lo que rompería al endurecer, sin romper nada.
+                  audit         = "restricted"
+                  audit-version = "latest"
+                  warn          = "restricted"
+                  warn-version  = "latest"
                 }
                 exemptions = {
                   usernames      = []
                   runtimeClasses = []
-                  namespaces     = [] # Lo dejamos vacío ya que Talos ya exime a "kube-system" internamente
+                  # Se deja VACÍO a propósito: Talos ya exime 'kube-system' internamente y
+                  # declararlo de nuevo hace fallar la validación de la machine config por
+                  # duplicidad (comprobado en Talos 1.13.4). En 'kube-system' viven Cilium,
+                  # CoreDNS, metrics-server y kubelet-csr-approver, que no cumplen 'baseline'.
+                  # Antes de endurecer 'enforce' a baseline, verificar la exención con la sonda
+                  # descrita en el README (sección de Pod Security Admission).
+                  namespaces = []
                 }
               }
             }
@@ -327,6 +342,36 @@ resource "proxmox_virtual_environment_vm" "talos_vm" {
   }
 
   depends_on = [time_sleep.wait_for_snippets]
+
+  lifecycle {
+    # ¿Por qué ignoramos 'started'?
+    # Este recurso se crea SIEMPRE con started = false (ver arriba) y el encendido lo
+    # realiza 'terraform_data.boot_vm' mediante 'qm start' vía SSH. Como los provisioners
+    # solo se ejecutan en la creación, el estado real en Proxmox queda en started = true
+    # y la configuración de Terraform sigue diciendo false. Sin este ignore_changes,
+    # CUALQUIER 'terraform apply' posterior sobre un clúster encendido planifica
+    # "started = true -> false" y APAGA las VMs, dejando el clúster caído (y nadie las
+    # vuelve a encender, porque boot_vm ya no se ejecuta).
+    #
+    # Con ignore_changes = [started] el ciclo de vida de energía queda fuera de Terraform:
+    # - En la creación se respeta started = false (se evita el arranque en cadena).
+    # - En applies posteriores no se toca el estado de la VM.
+    # - Cambios legítimos (memory, cpu, tags, etc.) siguen aplicándose; si el proveedor
+    #   necesita reiniciar la VM para aplicarlos, lo hace y la VM vuelve a arrancar.
+    # Si en el futuro se quisiera gestionar el encendido desde Terraform, habría que
+    # quitar 'started' de esta lista y modelarlo con una variable propia.
+    #
+    # Los atributos 'ipv4_addresses', 'ipv6_addresses' y 'network_interface_names' son
+    # de solo lectura y el proveedor los marca como "(known after apply)" en cuanto
+    # existe cualquier otro cambio en el recurso, generando diffs ruidosos que no
+    # representan una modificación real de configuración. Se ignoran por la misma razón.
+    ignore_changes = [
+      started,
+      ipv4_addresses,
+      ipv6_addresses,
+      network_interface_names,
+    ]
+  }
 }
 
 # El Temporizador (Hereda el for_each para no mezclar las VMs)

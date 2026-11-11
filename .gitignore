@@ -58,6 +58,10 @@ kubeconfig
 *.pub
 /certs
 
+# Values temporales con secretos renderizados por envsubst (ej: Argo CD)
+.argo-cd-secret-values.yaml
+.argo-cd-secret-values.yaml.tpl
+
 # Ignorar el archivo de secretos locales de terraform
 *.tfvars
 *.tfvars.json
@@ -66,6 +70,7 @@ kubeconfig
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfstate.*
 .terraform.lock.hcl
 
 # Talos

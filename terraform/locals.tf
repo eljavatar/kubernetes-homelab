@@ -27,6 +27,8 @@ locals {
     # de ahí acceder de forma segura a cualquier otro folder.
     k8s_path = "${path.root}/../k8s"
     talos_path = "${path.root}/../talos"
+    # Manifiestos GitOps (AppProject, Application raíz, Applications de cada componente)
+    gitops_path = "${path.root}/../gitops"
 
     KUBECONFIG = "${local.talos_path}/kubeconfig"
 

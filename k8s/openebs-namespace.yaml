@@ -1,0 +1,34 @@
+# Namespace de OpenEBS con el nivel de Pod Security Admission que necesita.
+#
+# ¿Por qué 'privileged'?
+#   El provisioner de hostpath de OpenEBS monta el directorio de datos del nodo
+#   (/var/openebs/local) mediante hostPath y ejecuta un contenedor privilegiado.
+#   Tanto 'hostPath' como 'privileged' están prohibidos por los perfiles 'baseline'
+#   y 'restricted', así que sin esta etiqueta sus pods son RECHAZADOS en la admisión.
+#
+# ¿Por qué hace falta aunque el clúster esté en 'privileged'?
+#   La etiqueta del namespace tiene prioridad sobre 'defaults.enforce' de la
+#   PodSecurityConfiguration (Talos). Declararla hace que el componente funcione
+#   igual con 'enforce: privileged', 'baseline' o 'restricted' como default, y
+#   documenta la excepción en Git en lugar de dejarla implícita.
+#
+# Orden de aplicación: SIEMPRE antes de instalar el chart. Si se instala primero,
+# el Deployment se queda reintentando con FailedCreate hasta que llega la etiqueta
+# (y 'helm install --wait' termina en timeout).
+#
+# Referencia: sección "Pod Security Admission" del README.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openebs
+  labels:
+    # Bloquea el nivel: cualquier pod que no cumpla 'privileged' se rechaza.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    # Se silencian también warn y audit en este namespace concreto: al ser una
+    # excepción documentada, avisar en cada 'kubectl apply' de que OpenEBS usa
+    # hostPath solo genera ruido. El resto del clúster sigue auditando en 'restricted'.
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest

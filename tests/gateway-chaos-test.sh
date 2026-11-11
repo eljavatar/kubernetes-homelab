@@ -2,7 +2,7 @@
 
 # Configuración del Laboratorio
 IP_GATEWAY="192.168.0.70"
-DOMINIO_PRUEBA="api.eljavatar.home"
+DOMINIO_PRUEBA="playground.eljavatar.home"
 NAMESPACE_RED="kube-system"
 DURACION_MONITOREO=15 # Segundos para validar estabilidad inicial
 

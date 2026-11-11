@@ -86,6 +86,8 @@ En ese orden de ideas, algo importante a tener en cuenta es asignar la cantidad 
 - **Motores de secretos pesados:** El uso del motor *Transit* (cifrado como servicio) consume mucha CPU.
 - **Logs de auditoría:** Si se activa el guardado de logs en archivos dentro del mismo disco, los 15 GB se llenarán rápidamente si hay mucho tráfico.
 
+---
+
 
 
 
@@ -197,7 +199,7 @@ Adicionalmente, habilitaremos el acceso mediante llaves SSH (por ejemplo para en
 ```sh
 ssh-keygen -t ed25519 -C "correo@email.com" -f ~/.ssh/id_proxmox_lxc_vault
 # Contraseña: Al pedir una passphrase, presionar Enter dos veces para dejarla en blanco ya que queremos que
-# Terraform automatice las conexiones sin pedir claves interactivamente.
+# el componente/script que use la llave automatice las conexiones sin pedir claves interactivamente.
 
 # Podemos verificar la lista de llaves que tenemos ejecutando:
 ls -l ~/.ssh/id_*.pub
@@ -623,6 +625,8 @@ Abrimos el navegador en nuestra máquina local (en mi caso, mi Macbook Pro), ing
    vault status
    ```
 
+---
+
 
 
 
@@ -786,6 +790,8 @@ Raft Applied Index      5046
 En esta salida podemos ver que `Sealed` ya aparece con valor `false`, ya que después de encender el LXC, el LXC inició Vault y Systemd lo desbloqueó de inmediato.
 
 Además, si hemos seguido todos los pasos hasta aquí, al ejecutar `printenv` también veremos que tenemos configuradas las variables de entorno `VAULT_ADDR` y `VAULT_SKIP_VERIFY`, con lo cual ya tenemos listo el ambiente de nuestro LXC para poder usar la CLI de `vault` sin preocuparnos por el unseal de la bóveda o por tener que agregar variables de entorno.
+
+---
 
 
 
@@ -2326,7 +2332,7 @@ kubectl get certificaterequests -n playground -o wide
 kubectl describe certificaterequest -n playground vault-server-cert-<ID_ALEATORIO>
 ```
 
-
+---
 
 
 
