@@ -1,0 +1,14 @@
+# Descheduler (chart 0.36.0)
+#
+# Se gestiona con el ApplicationSet y no con el App-of-Apps porque es un caso
+# "chart + values". La razón práctica: Terraform reescribe la revisión del generador
+# Y la del repositorio de values del ApplicationSet cuando se trabaja en ramas
+# test/<tema>, mientras que en una Application escrita a mano el 'ref: values'
+# quedaría apuntando a main y leería un layout distinto al de la rama.
+name: descheduler
+namespace: kube-system
+chartRepo: https://kubernetes-sigs.github.io/descheduler/
+chart: descheduler
+chartVersion: 0.36.0
+valuesFile: k8s/bootstrap/deployments/descheduler-values.yaml
+syncWave: "30"

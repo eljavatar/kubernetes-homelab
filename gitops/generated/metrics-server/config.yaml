@@ -1,0 +1,11 @@
+# Metrics Server (chart 3.13.1)
+#
+# Componente "chart + values": se gestiona con el ApplicationSet por la misma razón
+# que descheduler (ver su config.yaml).
+name: metrics-server
+namespace: kube-system
+chartRepo: https://kubernetes-sigs.github.io/metrics-server/
+chart: metrics-server
+chartVersion: 3.13.1
+valuesFile: k8s/bootstrap/deployments/metrics-server-values.yaml
+syncWave: "40"

@@ -1,0 +1,11 @@
+# OpenFeature Operator (chart 0.9.3)
+#
+# Componente "chart + values": se gestiona con el ApplicationSet por la misma razón
+# que descheduler (ver su config.yaml).
+name: open-feature-operator
+namespace: open-feature-operator-system
+chartRepo: https://open-feature.github.io/open-feature-operator
+chart: open-feature-operator
+chartVersion: 0.9.3
+valuesFile: k8s/bootstrap/deployments/open-feature-values.yaml
+syncWave: "50"

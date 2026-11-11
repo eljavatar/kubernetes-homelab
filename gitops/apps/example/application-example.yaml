@@ -1,13 +1,10 @@
-# Descheduler (chart 0.36.0)
+# Esta es una Application de ejemplo, la cual no hay riesgo de ser sincronizada por
+# el root (App-of-Apps) ya que el nombre del archivo no es 'application.yaml'
 #
 # Patrón de múltiples "sources":
 #   1. El chart, servido por su repositorio Helm.
 #   2. Nuestro repositorio Git, referenciado con 'ref: values', del que se leen
 #      los valueFiles (los mismos que usa Terraform en k8s/bootstrap/deployments/).
-#
-# OJO: si este release es gestionado por Terraform (terraform/k8s-bootstrap.tf),
-# NO se debe crear esta Application para evitar que dos dueños peleen por el
-# mismo release de Helm.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
