@@ -1,7 +1,7 @@
 # Variables
 AUTO_CONFIG_CLUSTER=true
 SYNC_WITH_TF=false
-IS_DEVELOPMENT=true
+IS_DEVELOPMENT=false
 USE_LOCAL_ISO=false
 USE_PROD_DOMAIN=true
 USE_LETSENCRYPT_PROD=false
@@ -32,7 +32,8 @@ tf-validate:
 # Publica los manifiestos GitOps en la rama de pruebas (reescribe la rama, sin acumular historial)
 # Primero creamos la variable de entorno GITOPS_BRANCH ya que el script la necesita
 # En caso de que la SSH Key no esté en '$HOME/.ssh/id_ed25519_gitops', se puede pasar la ruta mediante la variable GITOPS_SSH_KEY
-# En caso de que los archivos a comitear no estén en las rutas 'gitops/ k8s/deployments/', se pueden pasar mediante la variable GITOPS_PATHS
+# En caso de que los archivos a comitear no estén en las rutas 'gitops/ k8s/bootstrap/deployments/', se pueden pasar mediante la variable GITOPS_PATHS
+# En caso de que el tag que identifica el repositorio remoto no sea 'gitops', se puede pasar mediante la variable GITOPS_REMOTE
 gitops-publish:
 	GITOPS_BRANCH=$(GITOPS_BRANCH) ./scripts/gitops-publish.sh
 

@@ -235,14 +235,14 @@ resource "terraform_data" "wait_for_cilium_hubble" {
 # Configuración del Pool de IPs (Cilium)
 resource "kubectl_manifest" "cilium_ip_pool" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cilium-ip-pool.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cilium-ip-pool.yaml")
   depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
 # Configuración del L2 Advertisement (Cilium)
 resource "kubectl_manifest" "cilium_l2_policy" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cilium-l2-policy.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cilium-l2-policy.yaml")
   depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
@@ -299,13 +299,13 @@ resource "helm_release" "trust_manager" {
 # lo contrario, el for_each de kubectl_manifest.internal_ca no podrá planificarse
 data "kubectl_file_documents" "docs_internal_ca" {
   #count      = var.auto_config_cluster ? 1 : 0
-  content    = file("${local.k8s_path}/internal-ca.yaml")
+  content    = file("${local.k8s_path}/config/internal-ca.yaml")
   #depends_on = [helm_release.cert_manager]
 }
 
 # # Alternativa a kubectl_file_documents: Usar la función manifest_decode_multi
 # output "example_output" {
-#   value = provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/internal-ca.yaml"))
+#   value = provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/config/internal-ca.yaml"))
 # }
 
 resource "kubectl_manifest" "internal_ca" {
@@ -345,7 +345,7 @@ resource "kubectl_manifest" "internal_ca" {
 # No usamos kubernetes_manifest para esto, porque no admite multidocumento
 # resource "kubernetes_manifest" "internal_ca" {
 #   manifest = yamldecode(
-#     templatefile("${local.k8s_path}/internal-ca.yaml", {
+#     templatefile("${local.k8s_path}/config/internal-ca.yaml", {
 #       domain_name = var.domain_name
 #     })
 #   )
@@ -357,7 +357,7 @@ resource "kubectl_manifest" "internal_ca" {
 # Creamos el Trust Bundle
 resource "kubectl_manifest" "trust_bundle" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/trust-bundle.yaml")
+  yaml_body  = file("${local.k8s_path}/config/trust-bundle.yaml")
   depends_on = [helm_release.trust_manager]
 }
 
@@ -400,7 +400,7 @@ resource "kubectl_manifest" "letsencrypt_stage_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/config/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -415,7 +415,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/config/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -430,7 +430,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
 # Creamos el Namespace gateway-api-system
 resource "kubectl_manifest" "namespace_gateway_api_system" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/gateway-api-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/gateway-api-namespace.yaml")
   depends_on = [kubectl_manifest.letsencrypt_stage_cluster_issuer, kubectl_manifest.letsencrypt_prod_cluster_issuer]
 }
 
@@ -441,7 +441,7 @@ resource "kubectl_manifest" "namespace_gateway_api_system" {
 # Local
 resource "kubectl_manifest" "cert_gateway_local" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cert-gateway-local.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cert-gateway-local.yaml")
   depends_on = [kubectl_manifest.namespace_gateway_api_system]
 }
 
@@ -451,7 +451,7 @@ resource "kubectl_manifest" "cert_letsencrypt_public" {
 
   # Lee el archivo y reemplaza la cadena según el valor de var.use_letsencrypt_prod
   yaml_body = replace(
-    file("${local.k8s_path}/cert-letsencrypt-public.yaml"),
+    file("${local.k8s_path}/config/cert-letsencrypt-public.yaml"),
     "name: letsencrypt-stage-issuer",
     "name: ${var.use_letsencrypt_prod ? "letsencrypt-prod-issuer" : "letsencrypt-stage-issuer"}"
   )
@@ -480,7 +480,7 @@ resource "kubectl_manifest" "external_gateway" {
 # Creamos el redireccionador http global para que redireccione a https
 resource "kubectl_manifest" "global_http_redirect" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/global-http-redirect.yaml")
+  yaml_body  = file("${local.k8s_path}/config/global-http-redirect.yaml")
   depends_on = [kubectl_manifest.external_gateway]
 }
 
@@ -535,7 +535,7 @@ resource "kubectl_manifest" "cloudflared_agent" {
 #    con FailedCreate y 'helm install --wait' termina en timeout.
 resource "kubectl_manifest" "namespace_openebs" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/openebs-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/openebs-namespace.yaml")
   depends_on = [kubectl_manifest.cloudflared_agent]
 }
 
@@ -565,7 +565,7 @@ resource "helm_release" "openebs" {
 # 1. Creamos el namespace external_auth
 resource "kubectl_manifest" "namespace_external_auth" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/external-auth-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/external-auth-namespace.yaml")
   depends_on = [helm_release.openebs]
 }
 
@@ -574,7 +574,7 @@ resource "kubectl_manifest" "namespace_external_auth" {
 # Por esa razón, no puede usarse en el mismo plan donde se hace el bootstrap del clúster (con Talos), ya
 # que en esta instancia aún no hay un clúster de kubernetes existente.
 # resource "kubernetes_manifest" "vault_token_reviewer" {
-#   for_each = { for manifest in provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/vault-token-reviewer-setup.yaml")) : "${lower(manifest.kind)}-${manifest.metadata.name}" => manifest }
+#   for_each = { for manifest in provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/config/vault-token-reviewer-setup.yaml")) : "${lower(manifest.kind)}-${manifest.metadata.name}" => manifest }
 #   manifest = each.value
 #   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
@@ -585,14 +585,14 @@ resource "kubectl_manifest" "namespace_external_auth" {
 #   default = []
 # }
 # resource "kubectl_manifest" "vault_token_reviewer" {
-#   for_each   = var.auto_config_cluster ? toset(split("---", file("${local.k8s_path}/vault-token-reviewer-setup.yaml"))) : var.empty_string_set
+#   for_each   = var.auto_config_cluster ? toset(split("---", file("${local.k8s_path}/config/vault-token-reviewer-setup.yaml"))) : var.empty_string_set
 #   yaml_body  = each.value
 #   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
 
 # 2. Aplicamos el manifiesto de configuración del TokenReviewer
 data "kubectl_file_documents" "files_vault_token_reviewer_setup" {
-  content    = file("${local.k8s_path}/tf-vault-token-reviewer-setup-without-secret.yaml")
+  content    = file("${local.k8s_path}/config/tf-vault-token-reviewer-setup-without-secret.yaml")
 }
 
 resource "kubectl_manifest" "vault_token_reviewer_setup" {
@@ -706,25 +706,25 @@ resource "vault_kubernetes_auth_backend_config" "eljavatar_k8s_config" {
 # 1. Creamos los namespaces
 resource "kubectl_manifest" "namespace_ops_shared" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/shared-ops-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/shared-ops-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 resource "kubectl_manifest" "namespace_eso" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/eso-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/eso-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 resource "kubectl_manifest" "namespace_vso" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 # 2. Creamos los permisos mediante RBAC
 data "kubectl_file_documents" "files_vault_cert_syncer_rbac" {
-  content    = file("${local.k8s_path}/vault-cert-syncer-rbac.yaml")
+  content    = file("${local.k8s_path}/config/vault-cert-syncer-rbac.yaml")
 }
 
 resource "kubectl_manifest" "vault_cert_syncer_rbac" {
@@ -761,7 +761,9 @@ resource "terraform_data" "first_sync_vault_cert_manual" {
     #command = "kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
     # Intentamos eliminar primero en caso de que el Job exista (lo cual no debería pasar) y añadimos
     # la validación '--ignore-not-found' para evitar que el delete falle si el Job no existe
-    command = "kubectl delete job first-sync-vault-cert-manual -n shared-ops --ignore-not-found && kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    #command = "kubectl delete job first-sync-vault-cert-manual -n shared-ops --ignore-not-found && kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    # Renombramos el job a sync-vault-cert-first-manual para que coincida con la validación del script validate-cluster.sh
+    command = "kubectl delete job sync-vault-cert-first-manual -n shared-ops --ignore-not-found && kubectl create job sync-vault-cert-first-manual --from=cronjob/sync-vault-cert -n shared-ops"
     interpreter = ["/bin/bash", "-c"]
 
     environment = {
@@ -818,14 +820,14 @@ resource "helm_release" "vso" {
 # Configuración del VaultConnection (de VSO)
 resource "kubectl_manifest" "vso_vault_connection" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-vault-connection.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-vault-connection.yaml")
   depends_on = [helm_release.vso]
 }
 
 # Configuración del VaultAuthGlobal (de VSO)
 resource "kubectl_manifest" "vso_vault_auth_global" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-vault-auth-global.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-vault-auth-global.yaml")
   depends_on = [kubectl_manifest.vso_vault_connection]
 }
 
@@ -988,33 +990,53 @@ resource "terraform_data" "argocd_wait_gitops" {
         done
       }
 
+      # Espera a que una Application esté Synced Y Healthy, e imprime sus condiciones si no.
+      # Un error de generación de manifiestos (por ejemplo un valueFiles que no existe en la
+      # rama) deja sync=Unknown y health=Healthy, así que esperar solo por health lo daría por
+      # bueno: hay que exigir los dos estados.
+      wait_app_ok() {
+        app="$1"; timeout_s="$2"; i=0
+        while [ "$i" -lt "$timeout_s" ]; do
+          sync=$(kubectl get application "$app" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+          health=$(kubectl get application "$app" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+          if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+            echo "  $app: Synced/Healthy"
+            return 0
+          fi
+          sleep 5
+          i=$((i + 5))
+        done
+        echo "ERROR: '$app' no quedó Synced/Healthy en $timeout_s s (sync=$sync health=$health)." >&2
+        echo "Condiciones de la Application:" >&2
+        kubectl get application "$app" -n argocd \
+          -o jsonpath='{range .status.conditions[*]}  - {.type}: {.message}{"\n"}{end}' >&2
+        return 1
+      }
+
       # La raíz debe quedar sincronizada (es la que crea las Applications hijas)
       wait_for_app root 60
       kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
         application/root -n argocd --timeout=300s
 
-      # Los componentes gestionados por Argo CD deben quedar Healthy
+      # Los Componentes gestionados por Argo CD deben quedar Synced y Healthy
+      
+      # Componentes generados por el ApplicationSet (gitops/generated/<componente>/config.yaml).
+      # Si el generador apunta a otra rama, estas Applications no existen y aquí se ve el fallo.
+
+      wait_for_app argo-rollouts 60
+      wait_app_ok argo-rollouts 600
+      
+      wait_for_app reloader 60
+      wait_app_ok reloader 600
+
       wait_for_app descheduler 60
-      kubectl wait --for=jsonpath='{.status.health.status}'=Healthy \
-        application/descheduler -n argocd --timeout=600s
+      wait_app_ok descheduler 600
       
       wait_for_app metrics-server 60
-      kubectl wait --for=jsonpath='{.status.health.status}'=Healthy \
-        application/metrics-server -n argocd --timeout=600s
+      wait_app_ok metrics-server 600
       
       wait_for_app open-feature-operator 60
-      kubectl wait --for=jsonpath='{.status.health.status}'=Healthy \
-        application/open-feature-operator -n argocd --timeout=600s
-
-      # Componentes generados por el ApplicationSet (gitops/generated/reloader/config.yaml).
-      # Si el generador apunta a otra rama, esta Application no existe y aquí se ve el fallo.
-      wait_for_app argo-rollouts 60
-      kubectl wait --for=jsonpath='{.status.health.status}'=Healthy \
-        application/argo-rollouts -n argocd --timeout=600s
-
-      wait_for_app reloader 60
-      kubectl wait --for=jsonpath='{.status.health.status}'=Healthy \
-        application/reloader -n argocd --timeout=600s
+      wait_app_ok open-feature-operator 600
     EOT
 
     environment = {

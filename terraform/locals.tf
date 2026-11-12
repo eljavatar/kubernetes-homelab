@@ -25,7 +25,10 @@ locals {
     # ${path.root} apunta al directorio del módulo raíz (la carpeta terraform/ donde se ejecuta el comando).
     # Usar ../ nos permite "subir" un nivel al directorio principal del repositorio (kubernetes-homelab/) y
     # de ahí acceder de forma segura a cualquier otro folder.
-    k8s_path = "${path.root}/../k8s"
+    # Apunta a k8s/bootstrap: todo lo que aplica Terraform vive ahí, así que el resto
+    # del código (.tf) puede seguir usando rutas relativas a 'local.k8s_path' sin cambios.
+    # Los manifiestos de aplicaciones (k8s/apps/) no los aplica Terraform.
+    k8s_path = "${path.root}/../k8s/bootstrap"
     talos_path = "${path.root}/../talos"
     # Manifiestos GitOps (AppProject, Application raíz, Applications de cada componente)
     gitops_path = "${path.root}/../gitops"

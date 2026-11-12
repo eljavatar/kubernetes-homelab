@@ -5,7 +5,9 @@
 # Comportamiento:
 #   1. Reescribe la rama de trabajo partiendo del commit actual (git switch -C).
 #      Esto NO toca el working tree: los cambios sin commitear se conservan.
-#   2. Añade solo las rutas indicadas (por defecto gitops/ y k8s/deployments/).
+#   2. Añade solo las rutas indicadas (por defecto gitops/ y k8s/).
+#      Se publica todo 'k8s/' porque Argo CD lee de Git tanto los values del bootstrap
+#      (k8s/bootstrap/deployments/) como los de las aplicaciones (k8s/apps/).
 #   3. Crea un commit solo si hay cambios.
 #   4. Fuerza el push con --force-with-lease, de modo que la rama remota siempre
 #      queda "un commit por encima de main" y nunca acumula commits de prueba.
@@ -18,7 +20,7 @@
 # Variables de entorno:
 #   GITOPS_BRANCH   Rama de trabajo (default: test/gitops-bootstrap)
 #   GITOPS_PATHS    Rutas a publicar, separadas por espacios
-#                   (default: "gitops/ k8s/deployments/")
+#                   (default: "gitops/ k8s/")
 #   GITOPS_SSH_KEY  Clave SSH para el push (default: ~/.ssh/id_ed25519_gitops)
 #
 # Uso:
@@ -31,7 +33,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRANCH="${GITOPS_BRANCH:-test/gitops-bootstrap}"
 SSH_KEY="${GITOPS_SSH_KEY:-$HOME/.ssh/id_ed25519_gitops}"
-read -r -a PATHS <<< "${GITOPS_PATHS:-gitops/ k8s/deployments/}"
+REMOTE="${GITOPS_REMOTE:-gitops}"
+read -r -a PATHS <<< "${GITOPS_PATHS:-gitops/ k8s/}"
 
 # echo "BASH_SOURCE: ${BASH_SOURCE[0]}"
 # echo "REPO_ROOT: ${REPO_ROOT}"
@@ -40,6 +43,7 @@ read -r -a PATHS <<< "${GITOPS_PATHS:-gitops/ k8s/deployments/}"
 # #echo "GITOPS_SSH_KEY: ${GITOPS_SSH_KEY}"
 # echo "SSH_KEY: ${SSH_KEY}"
 # #echo "GITOPS_PATHS: ${GITOPS_PATHS}"
+# echo "REMOTE: ${REMOTE}"
 # echo "PATHS @: ${PATHS[@]}"
 # echo "PATHS *: ${PATHS[*]}"
 
@@ -87,7 +91,8 @@ fi
 
 # 4. Push forzado con arrendamiento (falla si el remoto cambió por fuera)
 # Si falla, la alternativa sería con 'git push --force'
-git push --force-with-lease -u origin "$BRANCH"
+#git push --force-with-lease -u origin "$BRANCH"
+git push --force-with-lease -u "$REMOTE" "$BRANCH"
 
 echo "OK: '${BRANCH}' publicada con: ${PATHS[*]}"
 echo "Para integrar en ${DEFAULT_BRANCH}: git switch ${DEFAULT_BRANCH} && git merge --squash ${BRANCH} && git commit"

@@ -32,6 +32,66 @@ Por tanto, me decidí por la opción 2, para lo cual tuve que adquirir un router
 
 
 
+## Estructura de carpetas del proyecto
+
+El repositorio está organizado por **capas de responsabilidad**, no por tipo de fichero: cada carpeta responde a "quién lo ejecuta" y "en qué orden". Así el árbol de ficheros funciona también como mapa mental del bootstrap.
+
+```text
+kubernetes-homelab/
+├── terraform/                 # Infraestructura como código (Proxmox, Talos, bootstrap de K8s)
+│   ├── main.tf                # VMs, red, VIP y módulo de nodos Talos
+│   ├── talos-patches.tf       # Aplica los patches de talos/patches/init
+│   ├── k8s-bootstrap.tf       # Todo lo que se instala y configura tras el bootstrap
+│   ├── locals.tf              # k8s_path, talos_path, gitops_path y el mapa de VMs
+│   ├── variables.tf           # auto_config_cluster, sync_with_tf, is_development, gitops_branch, use_prod_domain...
+│   └── modules/talos-node/    # Módulo reutilizable por cada VM
+├── talos/
+│   ├── patches/init/          # Machine config patches por nodo (red, labels, VIP)
+│   └── configs/               # Generado por Terraform; no se versiona
+├── k8s/
+│   ├── bootstrap/             # TODO lo que aplica Terraform (ver tabla siguiente)
+│   └── apps/                  # Cargas de trabajo posteriores: una carpeta por aplicación
+├── gitops/
+│   ├── projects/              # AppProject (permisos y repositorios permitidos)
+│   ├── bootstrap/             # Application raíz (patrón App-of-Apps)
+│   ├── apps/                  # Applications con spec propia
+│   ├── appsets/               # ApplicationSet para componentes homogéneos
+│   └── generated/             # Un config.yaml por componente del ApplicationSet
+├── vault/policies/            # Políticas HCL de Vault (KV, PKI, plantillas por SA)
+├── scripts/                   # gitops-publish, gitops-health, validate-cluster, clean_kubeconfig
+├── tests/                     # Manifiestos y scripts de las pruebas documentadas
+├── Makefile                   # Entrypoint único de automatización
+├── README.md                  # Este documento
+└── VAULT_README.md            # Guía de Vault (instalación, políticas, PKI)
+```
+
+| Carpeta | Qué contiene | Quién la ejecuta |
+|---------|--------------|------------------|
+| `terraform/` | Aprovisionamiento de Proxmox, Talos y el bootstrap del clúster | `make tf-plan` / `make tf-apply` |
+| `talos/` | Parches de machine config y los configs generados | Terraform (`talos_machine_configuration_apply`) |
+| `k8s/bootstrap/` | Manifiestos y values que dejan el clúster en estado "ready to work" | Terraform (y Argo CD para los values) |
+| `k8s/apps/` | Manifiestos y values de las aplicaciones que se despliegan **encima** del bootstrap | Argo CD o `kubectl`/`helm` manual |
+| `gitops/` | `Application`, `ApplicationSet` y `AppProject`: la fuente de verdad de Argo CD | Argo CD |
+| `vault/policies/` | Políticas de Vault para ESO/VSO y para la PKI | Operador (CLI de Vault) |
+| `scripts/` | Automatización de apoyo: publicar GitOps, comprobar salud, validar el clúster | `make` ó ejecución directa del `.sh` |
+| `tests/` | Manifiestos y scripts de las pruebas de cada sección | Manual o `scripts/validate-cluster.sh` |
+
+### Dentro de `k8s/bootstrap/`
+
+`k8s/bootstrap/` es exactamente el universo que Terraform aplica: `local.k8s_path` apunta ahí (ver [`terraform/locals.tf`](terraform/locals.tf)), así que **todo lo que se añada a esa carpeta es responsabilidad de Terraform**.
+
+| Subcarpeta | Qué contiene | Criterio para decidir si algo va aquí |
+|------------|--------------|--------------------------------------|
+| `config/` | `Namespace`, `Certificate`, `ClusterIssuer`, `ServiceAccount`, RBAC, `CiliumLoadBalancerIPPool`/`CiliumL2AnnouncementPolicy` y CRs de operadores (`VaultConnection`, `VaultAuthGlobal`) | Objetos que **configuran** el clúster, no que ejecutan cargas de trabajo |
+| `deployments/` | Values de Helm (`*-values.yaml`), manifiestos de workload propios (`vault-cert-syncer-cronjob.yaml`) y `cloudflare-tunnel/` | Todo lo que **ejecuta** algo |
+| `gateway-api-crds/` | Copia vendorizada de las CRDs de Gateway API (`v1.4.1/`) | Material de terceros que se quiere tener **offline** |
+| `templates/` | Solo ficheros `.tpl` que se renderizan con `templatefile()` desde Terraform | Necesitan variables de Terraform en el momento del apply |
+| `optional/` | Manifiestos documentados (en [`VAULT_README.md`](VAULT_README.md)) que no forman parte del bootstrap aplicado | Referencia que se conserva sin aplicarse |
+
+> `k8s/apps/` sigue otra convención (una carpeta por aplicación, con subcarpetas solo cuando hacen falta) documentada al final de este README en [Convenciones de organización de manifiestos](#convenciones-de-organizaci%C3%B3n-de-manifiestos).
+
+---
+
 ## Arquitectura Física y Conectividad
 
 El TP-Link Archer AX55 manejará el enrutamiento y el Wi-Fi, mientras que el switch administrado TL-SG108E será el corazón de la red cableada. La conexión física se da entonces de la siguiente forma:
@@ -757,9 +817,12 @@ terraform -chdir=terraform apply
 # - gitops_branch=main -> Indica la rama de la cual el App-of-Apps (root) de ArgoCD se va a traer los cambios
 #   del repositorio remoto de Git. Por defecto es 'main', pero si se están haciendo pruebas y no se quiere
 #   ensuciar la rama principal, se puede usar una rama alternativa.
-# - is_development=true -> Configura un admisionControl de tal modo que no se tenga que agregar un label
-#   a cada namespace para forzar que los pods tengan privilegios. Para entornos productivos, lo ideal
-#   sería que estuviera seteado en false.
+# - is_development=false -> Configura el admissionControl con la configuración `enforce: baseline`, lo que
+#   significa que todos los namespaces que se creen tendrán por defecto esa configuración; por lo tanto, si
+#   un pod debe crearse con privilegios (como por ejemplo OpenEBS), su namespace debe crearse aplicando el
+#   label `pod-security.kubernetes.io/enforce: privileged` (Ver sección de Pod Security Configuration de
+#   este README). Para casos de prueba puede dejarse en false, lo cual configuraría `enforce: baseline` y
+#   haría que todos los namespaces lo tengan por defecto (No recomendado en entornos de producción).
 # - use_local_iso=false -> Por defecto, el script descarga la imagen de Talos y la sube a cada nodo de
 #   Proxmox. En caso de tener problemas de conectividad a internet, lo ideal sería asignarlo en true, pero
 #   se debería subir la ISO como lo vimos anteriormente.
@@ -774,7 +837,7 @@ terraform -chdir=terraform apply \
   -var="auto_config_cluster=false" \
   -var="sync_with_tf=false" \
   -var="gitops_branch=test/some-branch" \
-  -var="is_development=false" \
+  -var="is_development=true" \
   -var="use_local_iso=true" \
   -var="use_prod_domain=false" \
   -var="use_letsencrypt_prod=true"
@@ -799,7 +862,7 @@ make tf-apply \
   AUTO_CONFIG_CLUSTER=false \
   SYNC_WITH_TF=false \
   GITOPS_BRANCH="test/some-branch" \
-  IS_DEVELOPMENT=false \
+  IS_DEVELOPMENT=true \
   USE_LOCAL_ISO=true \
   USE_PROD_DOMAIN=false \
   USE_LETSENCRYPT_PROD=true
@@ -1550,7 +1613,7 @@ helm repo update
 
 helm install kubelet-csr-approver kubelet-csr-approver/kubelet-csr-approver --version 1.2.14 \
   --namespace kube-system \
-  -f k8s/deployments/kubelet-csr-approver-values.yaml
+  -f k8s/bootstrap/deployments/kubelet-csr-approver-values.yaml
 
 # Validamos instalación del CSR approver
 kubectl get pods -n kube-system -o wide | grep -E "^NAME|kubelet-csr-approver"
@@ -1583,7 +1646,7 @@ helm repo update
 # Instalamos Cilium usando los valores configurados
 helm install cilium cilium/cilium --version 1.18.0 \
   --namespace kube-system \
-  -f k8s/deployments/cilium-values.yaml
+  -f k8s/bootstrap/deployments/cilium-values.yaml
 
 
 # Validamos pods de Cilium y Hubble
@@ -1610,7 +1673,7 @@ talosctl -n 192.168.0.31 logs -k kube-system/cilium-9dfmg:config:bcf171571b82
 talosctl -n 192.168.0.31 logs -k kube-system/cilium-9dfmg:clean-cilium-state:90f8ccbda429
 ```
 
-En el archivo `k8s/deployments/cilium-values.yaml` se pueden apreciar los bloques `cgroup` y `securityContext`, los cuales son específicos de Talos. Talos no monta automáticamente cgroup v2 como lo hace una distribución típica, por lo que es necesario indicarle a Cilium dónde encontrarlo.
+En el archivo `k8s/bootstrap/deployments/cilium-values.yaml` se pueden apreciar los bloques `cgroup` y `securityContext`, los cuales son específicos de Talos. Talos no monta automáticamente cgroup v2 como lo hace una distribución típica, por lo que es necesario indicarle a Cilium dónde encontrarlo.
 
 Por otro lado, las listas de capacidades (`securityContext.capabilities`) son más limitadas que las predeterminadas de Cilium porque Talos funciona con un perfil de seguridad más estricto y rechaza los pods que solicitan más recursos de los necesarios. Esto se debe a que en los valores por defecto, se incluye la capacidad `SYS_MODULE`, la cual le permite a un contenedor cargar dinámicamente módulos directamente en el kernel de Linux, mientras que Talos es un sistema operativo minimalista y ultra-seguro que bloquea por completo la carga de módulos de kernel desde cargas de trabajo de Kubernetes; es por esta razón que en nuestro archivo de values sobreescribimos dicha lista de capacidades.
 
@@ -1631,13 +1694,13 @@ helm repo update
 # Instalamos CoreDNS usando los valores configurados
 helm upgrade --install coredns coredns/coredns --version 1.46.0 \
   --namespace kube-system \
-  -f k8s/deployments/coredns-values.yaml
+  -f k8s/bootstrap/deployments/coredns-values.yaml
 
 # Validamos pods de CoreDNS
 kubectl get pods -n kube-system -o wide | grep -E "^NAME|coredns"
 ```
 
-En el archivo `k8s/deployments/coredns-values.yaml` especificamos reglas de `nodeAffinity` para que se instalen 3 instancias (para alta disponibilidad) de CoreDNS en nodos (VMs de Talos) de tipo `apps` (`worker-apps-01`), `data` (`worker-data-01`) y `ops` (`worker-ops-02`), en conjunto con reglas de `podAffinity` para indicarle además que intente por todos los medios no poner dos CoreDNS en el mismo nodo, pero si no hay otra opción, que las coloque juntas en pro de mantener las 3 réplicas vivas.
+En el archivo `k8s/bootstrap/deployments/coredns-values.yaml` especificamos reglas de `nodeAffinity` para que se instalen 3 instancias (para alta disponibilidad) de CoreDNS en nodos (VMs de Talos) de tipo `apps` (`worker-apps-01`), `data` (`worker-data-01`) y `ops` (`worker-ops-02`), en conjunto con reglas de `podAffinity` para indicarle además que intente por todos los medios no poner dos CoreDNS en el mismo nodo, pero si no hay otra opción, que las coloque juntas en pro de mantener las 3 réplicas vivas.
 
 
 ### Validar Instalación de Cilium en el Clúster
@@ -1828,18 +1891,18 @@ l2announcements:
 A continuación, se crea el grupo de direcciones IP. Para esto se debe escoger un rango de IPs que estén por fuera del rango del servidor DHCP del router, y que tampoco estén siendo usadas por otro servicio (como por ejemplo la `.31` o la `.40`). En este caso, usaremos el rango que va desde la IP `192.168.0.70` hasta la `192.168.0.149`:
 
 ```sh
-kubectl apply -f k8s/cilium-ip-pool.yaml
+kubectl apply -f k8s/bootstrap/config/cilium-ip-pool.yaml
 
 # Para validar:
 kubectl get ciliumloadbalancerippool -A
 ```
 
-Si en el futuro queremos ajustar este rango de IPs, solamente debemos editar el rango en el archivo `k8s/cilium-ip-pool.yaml` y volver a aplicar los cambios.
+Si en el futuro queremos ajustar este rango de IPs, solamente debemos editar el rango en el archivo `k8s/bootstrap/config/cilium-ip-pool.yaml` y volver a aplicar los cambios.
 
 Por último, configuramos la Announcement policy. Ésta le indica a Cilium qué nodos deben responder a las solicitudes ARP para esas direcciones IP y a través de qué interfaces:
 
 ```sh
-kubectl apply -f k8s/cilium-l2-policy.yaml
+kubectl apply -f k8s/bootstrap/config/cilium-l2-policy.yaml
 
 # Para validar:
 kubectl get ciliuml2announcementpolicy -A
@@ -1847,7 +1910,7 @@ kubectl get ciliuml2announcementpolicy -A
 kubectl -n kube-system exec ds/cilium -- cilium status
 ```
 
-En el archivo `k8s/cilium-l2-policy.yaml` se configuraron las interfaces de red más comunes (`eth*`, `enp*`, `ens*`, etc.). Sin embargo, no está de más validar cuál es la interface que estamos usando. Para esto, podemos ejecutar lo siguiente (para al menos una VM por cada Nodo de Proxmox):
+En el archivo `k8s/bootstrap/config/cilium-l2-policy.yaml` se configuraron las interfaces de red más comunes (`eth*`, `enp*`, `ens*`, etc.). Sin embargo, no está de más validar cuál es la interface que estamos usando. Para esto, podemos ejecutar lo siguiente (para al menos una VM por cada Nodo de Proxmox):
 
 ```sh
 # List network interfaces (identificamos las que estén up)
@@ -1857,7 +1920,7 @@ talosctl get links --nodes 192.168.0.31
 talosctl get addresses --nodes 192.168.0.31
 ```
 
-En caso de que la interface de red no coincida con las que tenemos configuradas en `k8s/cilium-l2-policy.yaml`, debemos agregarla a dicho archivo en la sección `spec.interfaces`.
+En caso de que la interface de red no coincida con las que tenemos configuradas en `k8s/bootstrap/config/cilium-l2-policy.yaml`, debemos agregarla a dicho archivo en la sección `spec.interfaces`.
 
 
 ### Opción B: MetalLB
@@ -1882,7 +1945,7 @@ kubectl get pods -n metallb-system
 Posteriormente, aplicamos el manifiesto que configurará el pool de IPs que serán asignadas para los diversos servicios y que las anunciará para acceder a dichos servicios por fuera del clúster:
 
 ```sh
-kubectl apply -f k8s/metallb-config.yaml
+kubectl apply -f k8s/bootstrap/config/metallb-config.yaml
 ```
 
 ---
@@ -1955,7 +2018,7 @@ helm repo update
 # Instalar cert-manager en su namespace dedicado
 helm install cert-manager jetstack/cert-manager --version 1.21.0 \
   --namespace cert-manager --create-namespace \
-  -f k8s/deployments/cert-manager-values.yaml
+  -f k8s/bootstrap/deployments/cert-manager-values.yaml
 
 # Validación de pods de Cert Manager
 kubectl get pods -n cert-manager -o wide | grep -E "^NAME|cert-manager"
@@ -1976,7 +2039,7 @@ Así pues, este emisor (`selfsigned-issuer`) solo se utiliza para emitir exactam
 Para crear estos emisores, secreto y certificado, ejecutamos lo siguiente:
 
 ```sh
-kubectl apply -f k8s/internal-ca.yaml
+kubectl apply -f k8s/bootstrap/config/internal-ca.yaml
 
 # Para validar, ejecutamos los siguientes comandos (la columna READY debe marcar True):
 kubectl get clusterissuer -o wide
@@ -1991,7 +2054,7 @@ kubectl describe certificate internal-ca-cert -n cert-manager
 kubectl logs -n cert-manager -l app.kubernetes.io/instance=cert-manager --tail=100
 ```
 
-En este manifiesto multi-documento `k8s/internal-ca.yaml` podemos apreciar que los recursos de tipo `ClusterIssuer` no se crean sobre un namespace en específico; esto es porque en Kubernetes existen dos tipos de recursos: los que están aislados por namespace (como los Pods, Services o Issuer) y los que son globales para todo el clúster (como los Nodes, Namespaces o ClusterIssuer).
+En este manifiesto multi-documento `k8s/bootstrap/config/internal-ca.yaml` podemos apreciar que los recursos de tipo `ClusterIssuer` no se crean sobre un namespace en específico; esto es porque en Kubernetes existen dos tipos de recursos: los que están aislados por namespace (como los Pods, Services o Issuer) y los que son globales para todo el clúster (como los Nodes, Namespaces o ClusterIssuer).
 
 Los `ClusterIssuer` se diseñaron como un recurso global por arquitectura: Al no tener `namespace`, cualquier recurso `Certificate` de cualquier `namespace` del clúster puede utilizarlo para pedir un certificado. Si usáramos un `Issuer` común, tendríamos que clonar la configuración del emisor en cada namespace de las aplicaciones y servicios (Java, Go, Postgres, etc.), lo cual sería ineficiente.
 
@@ -2041,7 +2104,7 @@ Como el repositorio es el mismo que ya habíamos añadido al instalar cert-manag
 # Instalamos
 helm install trust-manager jetstack/trust-manager --version 0.24.0 \
   --namespace cert-manager \
-  -f k8s/deployments/trust-manager-values.yaml
+  -f k8s/bootstrap/deployments/trust-manager-values.yaml
 
 # Validamos pods de Trust manager
 kubectl get pods -n cert-manager -o wide | grep -E "^NAME|trust-manager"
@@ -2053,7 +2116,7 @@ Al aplicar el siguiente manifiesto, se le dice a trust-manager que tome la CA in
 
 ```sh
 # Crea el configmap cluster-trusted-ca en cada namespace
-kubectl apply -f k8s/trust-bundle.yaml
+kubectl apply -f k8s/bootstrap/config/trust-bundle.yaml
 
 # Para validar, listamos el ConfigMap
 kubectl get configmap cluster-trusted-ca -n default
@@ -2066,7 +2129,7 @@ kubectl describe configmap cluster-trusted-ca -n default
 kubectl logs -n cert-manager -l app.kubernetes.io/instance=trust-manager --tail=50
 ```
 
-En el manifiesto `k8s/trust-bundle.yaml` se puede apreciar que usamos `namespaceSelector.matchLabels: {}` que es un comparador vacío, mediante el cual propagamos el paquete (el certificado público) a cada namespace. Empezar de forma permisiva está bien porque el certificado público no es confidencial; solo la clave privada lo es, y esta nunca sale del namespace `cert-manager`.
+En el manifiesto `k8s/bootstrap/config/trust-bundle.yaml` se puede apreciar que usamos `namespaceSelector.matchLabels: {}` que es un comparador vacío, mediante el cual propagamos el paquete (el certificado público) a cada namespace. Empezar de forma permisiva está bien porque el certificado público no es confidencial; solo la clave privada lo es, y esta nunca sale del namespace `cert-manager`.
 
 Entonces, en resumen, el propósito de este Bundle no es ayudar a Cilium a descifrar el tráfico, sino ayudar a las aplicaciones internas a confiar en nuestra CA interna, y para esto, copia un ConfigMap llamado `cluster-trusted-ca` en todos los namespaces del clúster. Así, si en el futuro un Pod dentro del clúster necesita consumir un servicio a través de `https://eljavatar.home`, ese Pod podrá montar dicho ConfigMap para saber que la entidad que firmó el Gateway (`internal-ca-issuer`) (lo cual veremos más adelante) es de total confianza.
 
@@ -2162,12 +2225,12 @@ Anteriormente habíamos creado un API Token de Cloudflare. Para que el `ClusterI
 
 1. Copiar la plantilla de ejemplo para crear el archivo local:
    ```sh
-   cp k8s/cloudflare-secret.yaml.example k8s/cloudflare-secret.yaml
+   cp k8s/bootstrap/config/cloudflare-secret.yaml.example k8s/bootstrap/config/cloudflare-secret.yaml
    ```
 2. Abrir `cloudflare-secret.yaml` con el editor y reemplazar `"TOKEN_DE_CLOUDFLARE_AQUÍ"` por el API Token real.
 3. Aplicar el secreto en el clúster:
    ```bash
-   kubectl apply -f k8s/cloudflare-secret.yaml
+   kubectl apply -f k8s/bootstrap/config/cloudflare-secret.yaml
    ```
 
 Otra alternativa sería crearlo directamente sin usar un manifiesto (reemplazar `"TOKEN_DE_CLOUDFLARE_AQUÍ"` por el API Token real):
@@ -2204,25 +2267,25 @@ A continuación vemos los pasos para crear el `ClusterIssuer`, y debido a que en
 export PERSONAL_EMAIL="personal@example.com"
 export CLOUDFLARE_ACCOUNT_EMAIL="cloudflare-account@example.com"
 # Paso B: Usamos envsubst para reemplazar los marcadores ${VAR} antes de pasarle el resultado a kubectl
-envsubst < k8s/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
-envsubst < k8s/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
 
 # Opción 2: Creando variables de entorno en el archivo .env
 # Paso A: Agregamos las variables de entorno al archivo .env
 PERSONAL_EMAIL=personal@example.com
 CLOUDFLARE_ACCOUNT_EMAIL=cloudflare-account@example.com
 # Paso B: Lee el .env, inyecta los valores en memoria temporal y se los pasa a kubectl sin modificar el
-# archivo físico k8s/letsencrypt-stage-cluster-issuer.yaml
-export $(cat .env | xargs) && envsubst < k8s/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
-export $(cat .env | xargs) && envsubst < k8s/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
+# archivo físico k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
 
 # Opción 3: Modificando el manifiesto
-# Paso A: Reemplazar en el archivo k8s/letsencrypt-stage-cluster-issuer.yaml los marcadores ${VAR}
+# Paso A: Reemplazar en el archivo k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml los marcadores ${VAR}
 # según el valor correspondiente
 # Paso B: Ejecutar el comando de kubectl
 # Al escoger esta opción, lo ideal sería agregar estos archivos al .gitignore
-kubectl apply -f k8s/letsencrypt-stage-cluster-issuer.yaml
-kubectl apply -f k8s/letsencrypt-prod-cluster-issuer.yaml
+kubectl apply -f k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml
+kubectl apply -f k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml
 
 # Ver que en la lista de emisores se haya creado el de Let's Encrypt
 kubectl get clusterissuer -o wide
@@ -2234,7 +2297,7 @@ kubectl describe clusterissuer letsencrypt-stage-issuer
 kubectl describe secret -n cert-manager letsencrypt-stage-account-key
 ```
 
-_**Nota de desarrollo 1:** Para pruebas iniciales, se recomienda usar la URL de staging `https://acme-staging-v02.api.letsencrypt.org/directory` para evitar bloquear nuestro dominio por exceder los límites de intentos de Let's Encrypt si algo falla en las credenciales de Cloudflare (`k8s/letsencrypt-stage-cluster-issuer.yaml`). Los certificados de prueba no son de confianza pública, pero los límites de frecuencia son flexibles, por lo que un certificado mal configurado que reintente indefinidamente no agotará su cuota. En contraste, en producción se aplican 50 certificados por dominio registrado por semana y 5 certificados duplicados por semana; un bucle en un certificado defectuoso alcanzaría ambos límites en una hora._
+_**Nota de desarrollo 1:** Para pruebas iniciales, se recomienda usar la URL de staging `https://acme-staging-v02.api.letsencrypt.org/directory` para evitar bloquear nuestro dominio por exceder los límites de intentos de Let's Encrypt si algo falla en las credenciales de Cloudflare (`k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml`). Los certificados de prueba no son de confianza pública, pero los límites de frecuencia son flexibles, por lo que un certificado mal configurado que reintente indefinidamente no agotará su cuota. En contraste, en producción se aplican 50 certificados por dominio registrado por semana y 5 certificados duplicados por semana; un bucle en un certificado defectuoso alcanzaría ambos límites en una hora._
 
 _**Nota de desarrollo 2:** Podemos crear los 2 `ClusterIssuer` sin problema y con total seguridad (el de `letsencrypt-stage` y el de `letsencrypt-prod`), ya que en esta instancia aún no se ha generado ningún Certificado; sin embargo, en los siguientes pasos, si no estamos seguros si el Certificado que se va a generar puede estar defectuoso o no, sería mejor crear dicho certificado usando solo el emisor `letsencrypt-stage-issuer`._
 
@@ -2251,19 +2314,19 @@ A continuación, tenemos los comandos para generar el Certificado:
 ```sh
 # 1. En primer lugar, como los certificados deben estar en el mismo namespace que el Gateway,
 #    creamos primero dicho namespace:
-kubectl apply -f k8s/gateway-api-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-namespace.yaml
 
 # 2. Creamos el Certificado local
-kubectl apply -f k8s/cert-gateway-local.yaml
+kubectl apply -f k8s/bootstrap/config/cert-gateway-local.yaml
 
 # 3. Creamos el Certificado de Let's Encrypt para Stage
 # Este solo aplicaría si tenemos dominio y creamos el ClusterIssur de Let's Encrypt (sección anterior)
-kubectl apply -f k8s/cert-letsencrypt-public.yaml
+kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml
 ```
 
 Al aplicar este último manifiesto, `cert-manager` detectará el `ClusterIssuer` de Cloudflare, creará el registro TXT en nuestro DNS y, tras validarlo, depositará las llaves TLS en el Secret `cert-letsencrypt-public-secret`. Posteriormente cuando creemos nuestro Gateway de Cilium, éste leerá ese Secret inmediatamente y empezará a servir tráfico web seguro desde Internet.
 
-Adicionalmente, en `k8s/cert-letsencrypt-public.yaml` se puede apreciar que configuramos explícitamente `privateKey` con el algoritmo **`ECDSA` de 256 bits** en lugar del clásico RSA. Esto lo hicimos así porque las llaves ECDSA son significativamente más pequeñas, consumen menos ancho de banda en el handshake TLS y ofrecen el mismo nivel de seguridad criptográfica, lo cual reduce el consumo de CPU en el proxy de Cilium.
+Adicionalmente, en `k8s/bootstrap/config/cert-letsencrypt-public.yaml` se puede apreciar que configuramos explícitamente `privateKey` con el algoritmo **`ECDSA` de 256 bits** en lugar del clásico RSA. Esto lo hicimos así porque las llaves ECDSA son significativamente más pequeñas, consumen menos ancho de banda en el handshake TLS y ofrecen el mismo nivel de seguridad criptográfica, lo cual reduce el consumo de CPU en el proxy de Cilium.
 
 _**Nota:** El proceso de validación DNS de Let's Encrypt con Cloudflare tarda usualmente entre 1 y 3 minutos. Podemos monitorear el estado con `kubectl get certificate -n gateway-api-system`._
 
@@ -2306,7 +2369,7 @@ Como mencionamos anteriormente, el proceso de validación puede tomar varios min
 
 ### Usar el ClusterIssuer de Let's Encrypt de Producción
 
-Si el validar el estado con `kubectl get certificate -n gateway-api-system` vemos que queda en `READY=True`, y no vamos a volver a recrear el Certificado (por ejemplo no necesitamos hacer más pruebas de crear/eliminar un certificado), podemos editar el archivo `k8s/cert-letsencrypt-public.yaml` para que use el `ClusterIssuer` que le pega al ACME de Let's Encrypt de Producción:
+Si el validar el estado con `kubectl get certificate -n gateway-api-system` vemos que queda en `READY=True`, y no vamos a volver a recrear el Certificado (por ejemplo no necesitamos hacer más pruebas de crear/eliminar un certificado), podemos editar el archivo `k8s/bootstrap/config/cert-letsencrypt-public.yaml` para que use el `ClusterIssuer` que le pega al ACME de Let's Encrypt de Producción:
 
 ```yaml
 spec:
@@ -2319,7 +2382,7 @@ spec:
 Después de hacer el ajuste, solo debemos guardar y aplicar de nuevo el manifiesto:
 
 ```sh
-kubectl apply -f k8s/cert-letsencrypt-public.yaml
+kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml
 ```
 
 Al aplicarlo, `cert-manager` detectará el cambio de configuración, se comunicará con el servidor real de Let's Encrypt, resolverá el nuevo desafío DNS y sobreescribirá el contenido de `cert-letsencrypt-public-secret` con las llaves de producción firmadas legalmente. Por otro lado, Cilium (gracias a Envoy) detectará el cambio en el Secret en caliente y comenzará a servir el nuevo certificado válido sin necesidad de reiniciar el Gateway (en caso de ya haberlo levantado) ni interrumpir las conexiones de los usuarios.
@@ -2366,14 +2429,14 @@ Cilium revolucionó la forma de desplegar proxies con su arquitectura moderna en
 
 ### Levantar el Gateway de Cilium
 
-Una vez que los certificados que creamos anteriormente pasen a estado `READY: True`, aplicamos nuestro Gateway global ejecutando lo siguiente (en caso de que no tengamos un dominio en Cloudflare, y por ende no hayamos configurado el certificado emitido por Let's Encrypt, en el archivo `k8s/gateway-api-external.yaml` deberíamos comentar o eliminar el listener `https-publico`):
+Una vez que los certificados que creamos anteriormente pasen a estado `READY: True`, aplicamos nuestro Gateway global ejecutando lo siguiente (en caso de que no tengamos un dominio en Cloudflare, y por ende no hayamos configurado el certificado emitido por Let's Encrypt, en el archivo `k8s/bootstrap/config/gateway-api-external.yaml` deberíamos comentar o eliminar el listener `https-publico`):
 
 ```sh
 # Creamos el namespace (Solo en caso de que no lo hayamos creado previamente)
-kubectl apply -f k8s/gateway-api-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-namespace.yaml
 
 # Creamos el Gateway
-kubectl apply -f k8s/gateway-api-external.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-external.yaml
 
 # Para validar, ejecutamos lo siguiente
 kubectl get gateway -n gateway-api-system
@@ -2442,7 +2505,7 @@ De esta forma, Cilium le asignará la IP `10.0.50.1` a este Gateway, y si alguie
 
 ### Configurar Redirección HTTP Global
 
-Si revisamos el manifiesto `k8s/gateway-api-external.yaml` podemos ver que dejamos un listener para el trafíco `http` (puerto `80`). Hoy en día, **ninguna aplicación debería servir tráfico en texto plano (HTTP)** por motivos de seguridad. Sin embargo, los usuarios en Internet (o incluso uno mismo en la red local) rara vez escriben `https://` en la barra de direcciones; lo normal es escribir simplemente por ejemplo `eljavatar.home`.
+Si revisamos el manifiesto `k8s/bootstrap/config/gateway-api-external.yaml` podemos ver que dejamos un listener para el trafíco `http` (puerto `80`). Hoy en día, **ninguna aplicación debería servir tráfico en texto plano (HTTP)** por motivos de seguridad. Sin embargo, los usuarios en Internet (o incluso uno mismo en la red local) rara vez escriben `https://` en la barra de direcciones; lo normal es escribir simplemente por ejemplo `eljavatar.home`.
 
 Cuando hacemos esto, el navegador intenta conectarse por defecto al puerto `80` (HTTP). Si eliminamos por completo el listener HTTP del Gateway, tendríamos el siguiente resultado:
 
@@ -2458,7 +2521,7 @@ Así pues, para automatizar la redirección global de HTTP a HTTPS sin necesidad
 Para esto, aplicamos el siguiente manifiesto:
 
 ```sh
-kubectl apply -f k8s/global-http-redirect.yaml
+kubectl apply -f k8s/bootstrap/config/global-http-redirect.yaml
 
 # Para validar, lanzamos un curl apuntando explícitamente al protocolo http:// (puerto 80):
 # Prueba A: validando el dominio local
@@ -2507,7 +2570,7 @@ No sirve, por dos razones independientes y cada una suficiente por sí sola:
 
 #### Ejemplo: añadir el árbol `*.apps`
 
-1. Ampliar el certificado interno (en [`k8s/cert-gateway-local.yaml`](k8s/cert-gateway-local.yaml)):
+1. Ampliar el certificado interno (en [`k8s/bootstrap/config/cert-gateway-local.yaml`](k8s/bootstrap/config/cert-gateway-local.yaml)):
 
 ```yaml
   dnsNames:
@@ -2516,7 +2579,7 @@ No sirve, por dos razones independientes y cada una suficiente por sí sola:
     - "*.apps.eljavatar.home"   # cubre api.apps.eljavatar.home
 ```
 
-2. Añadir el listener (en [`k8s/gateway-api-external.yaml`](k8s/gateway-api-external.yaml)), reutilizando **el mismo** `Secret` (lo que distingue al listener es el `hostname`, no el certificado):
+2. Añadir el listener (en [`k8s/bootstrap/config/gateway-api-external.yaml`](k8s/bootstrap/config/gateway-api-external.yaml)), reutilizando **el mismo** `Secret` (lo que distingue al listener es el `hostname`, no el certificado):
 
 ```yaml
     - name: https-local-apps
@@ -2533,7 +2596,7 @@ No sirve, por dos razones independientes y cada una suficiente por sí sola:
             name: cert-gateway-local-secret
 ```
 
-3. Repetir para el dominio público (en [`k8s/cert-letsencrypt-public.yaml`](k8s/cert-letsencrypt-public.yaml) más el listener `https-publico-apps` en [`k8s/gateway-api-external.yaml`](k8s/gateway-api-external.yaml)) y para la plantilla [`k8s/templates/gateway-api-external.yaml.tpl`](k8s/templates/gateway-api-external.yaml.tpl), o las dos vías de instalación divergerían.
+3. Repetir para el dominio público (en [`k8s/bootstrap/config/cert-letsencrypt-public.yaml`](k8s/bootstrap/config/cert-letsencrypt-public.yaml) más el listener `https-publico-apps` en [`k8s/bootstrap/config/gateway-api-external.yaml`](k8s/bootstrap/config/gateway-api-external.yaml)) y para la plantilla [`k8s/bootstrap/templates/gateway-api-external.yaml.tpl`](k8s/bootstrap/templates/gateway-api-external.yaml.tpl), o las dos vías de instalación divergerían.
 4. En la ruta, fijar el listener: `parentRefs[].sectionName: https-local-apps`.
 5. Crear el registro DNS correspondiente (Pi-hole o `/etc/hosts` para `.home`, Cloudflare para `.org`), ya que el certificado no crea DNS.
 
@@ -2563,7 +2626,7 @@ Para esto, seguimos los siguientes pasos:
 1. Creamos un namespace dentro del cual correrá nuestro agente:
 
 ```sh
-kubectl apply -f k8s/deployments/cloudflare-tunnel/namespace.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/namespace.yaml
 ```
 
 2. Creamos un secreto con el token que habíamos guardado previamente cuando creamos el tunnel en Cloudflare (no confundir con el API Token que usamos para los certificados) (para esto, tenemos 3 opciones):
@@ -2574,21 +2637,21 @@ kubectl apply -f k8s/deployments/cloudflare-tunnel/namespace.yaml
 export CLOUDFLARE_TUNNEL_TOKEN="token_del_tunnel"
 # Paso B: Usamos envsubst para reemplazar el marcador ${CLOUDFLARE_TUNNEL_TOKEN} antes de
 # pasarle el resultado a kubectl
-envsubst < k8s/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
 
 # Opción 2: Creando la variable de entorno en el archivo .env
 # Paso A: Agregamos la variable de entorno al archivo .env
 CLOUDFLARE_TUNNEL_TOKEN=token_del_tunnel
 # Paso B: Lee el .env, inyecta los valores en memoria temporal y se los pasa a kubectl sin modificar el
-# archivo físico k8s/deployments/cloudflare-tunnel/secret.yaml
-export $(cat .env | xargs) && envsubst < k8s/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
+# archivo físico k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
 
 # Opción 3: Modificando el manifiesto
-# Paso A: Reemplazar en el archivo k8s/deployments/cloudflare-tunnel/secret.yaml el marcador
+# Paso A: Reemplazar en el archivo k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml el marcador
 # ${CLOUDFLARE_TUNNEL_TOKEN}
 # Paso B: Ejecutar el comando de kubectl
 # Al escoger esta opción, lo ideal sería agregar este archivo al .gitignore
-kubectl apply -f k8s/deployments/cloudflare-tunnel/secret.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml
 
 
 # Validamos que se creó el Secret (en data debe contener TUNNEL_TOKEN)
@@ -2602,7 +2665,7 @@ export CLOUDFLARE_TUNNEL_TOKEN=$(kubectl get secret --namespace cloudflare-tunne
 
 ```sh
 # Esto levantará 2 réplicas del pod:
-kubectl apply -f k8s/deployments/cloudflare-tunnel/deployment.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/deployment.yaml
 
 # Validamos el estado de los pods
 kubectl get pods -n cloudflare-tunnel-system -o wide
@@ -2677,12 +2740,12 @@ helm repo update
 # El provisioner de hostpath monta el directorio de datos del nodo y corre privilegiado,
 # así que con el default 'enforce: baseline' sus pods serían rechazados en la admisión.
 # Etiquetar antes de instalar evita que el Deployment se quede reintentando con FailedCreate.
-kubectl apply -f k8s/openebs-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/openebs-namespace.yaml
 
 # Instalamos SIN --create-namespace (el namespace ya existe y ya está etiquetado)
 helm upgrade --install openebs openebs/openebs --version 4.5.1 \
   -n openebs \
-  -f k8s/deployments/openebs-values.yaml
+  -f k8s/bootstrap/deployments/openebs-values.yaml
 ```
 
 > La etiqueta del namespace manda sobre `defaults.enforce` de la machine config, así que este paso funciona igual si el clúster tiene `privileged`, `baseline` o `restricted` como default. Ver [Pod Security Admission](#pod-security-admission-niveles-matriz-por-componente-y-comprobaciones).
@@ -2834,9 +2897,9 @@ flowchart TD
 | [Instalación de OpenEBS](#instalaci%C3%B3n-de-openebs) | 0 → 2 | **Terraform** (hoy) | Es el candidato natural a migrar: chart + values puro. Solo puede migrarse si ninguna aplicación de la wave 0 necesita PVC (por el momento no lo vamos a migrar) |
 | [Argo Rollouts](#argo-rollouts) | 2 | **Argo CD** | No es requisito de nada que esté por debajo; si se cae, Argo CD sigue entrando |
 | [Reloader](#reloader) | 2 | **Argo CD** | Chart + values, encaja en el catálogo del `ApplicationSet` |
-| [Descheduler](#descheduler) | 1 | **Argo CD** | Ídem: es un optimizador, no un prerrequisito |
-| [Metrics Server](#metrics-server) | 1 | **Argo CD** | Ídem: solo alimenta HPAs y `kubectl top` |
-| [OpenFeature Operator](#openfeature-operator) | 1 | **Argo CD** | Depende de cert-manager, que ya está arriba, así que Argo CD puede esperarlo por salud |
+| [Descheduler](#descheduler) | 2 | **Argo CD** | Ídem: es un optimizador, no un prerrequisito |
+| [Metrics Server](#metrics-server) | 2 | **Argo CD** | Ídem: solo alimenta HPAs y `kubectl top` |
+| [OpenFeature Operator](#openfeature-operator) | 2 | **Argo CD** | Depende de cert-manager, que ya está arriba, así que Argo CD puede esperarlo por salud |
 | Componentes futuros | 1 o 2 | **Argo CD** | Un upgrade de versión no debería requerir tocar HCL ni un `terraform apply` |
 
 > **Cómo se materializa en el código:** los `helm_release` de la capa 1 y 2 siguen existiendo en `terraform/k8s-bootstrap.tf` pero están condicionados a `count = var.auto_config_cluster && var.sync_with_tf ? 1 : 0`. Con `sync_with_tf = false` (el modo recomendado) Terraform **no** los toca y los instala Argo CD; con `sync_with_tf = true` Terraform reproduce el bootstrap completo sin depender de Git ni del acceso a Argo CD (modo de emergencia o "Terraform-first").
@@ -2867,10 +2930,11 @@ Como mencioné antes, en este Homelab conviven dos planos de automatización (Te
 
 ### Cómo añadir un componente utilitario nuevo
 
-1. Añadir el `values.yaml` en `k8s/deployments/<componente>-values.yaml` (así lo comparten Terraform y Argo CD: una sola fuente de valores).
+1. Añadir el `values.yaml` en `k8s/bootstrap/deployments/<componente>-values.yaml` (así lo comparten Terraform y Argo CD: una sola fuente de valores).
 2. Elegir mecanismo:
    - **Es un chart de Helm con un `values.yaml`** → crear `gitops/generated/<componente>/config.yaml` con `name`, `namespace`, `chartRepo`, `chart`, `chartVersion`, `valuesFile` y `syncWave`.
    - **Necesita una spec a mano** (multi-source no homogéneo, CRs sueltos, `ignoreDifferences`, hooks) → crear `gitops/apps/<componente>/application.yaml`.
+   - **Cuidado con el `ref: values` en una Application escrita a mano:** su `targetRevision` es un valor fijo y Terraform solo reescribe la revisión del `root` y del `ApplicationSet`. Si el componente necesita values de este repositorio y quieres poder probarlo en ramas `test/<tema>`, va al `ApplicationSet`; una Application a mano leería los values de `main` y fallaría con `no such file or directory` mientras el layout de la rama difiera.
 3. Elegir la wave según las dependencias reales: `0` almacenamiento, `10-20` operadores base, `30-40` utilidades, `50` cargas que dependen de todo lo anterior.
 4. Si el componente debe bloquear `make tf-apply` hasta estar sano, añadirlo a la lista de espera de `terraform_data.argocd_wait_gitops`.
 5. `git commit` + `git push` (o `make gitops-publish` si se está probando en una rama `test/<tema>`). No se necesita `terraform apply`.
@@ -2891,6 +2955,7 @@ Depende de **quién lo creó**, y el orden de los pasos importa. En la siguiente
 `terraform_data.argocd_wait_gitops` usa un provisioner `local-exec`, y los provisioners de Terraform **solo se ejecutan al crear o reemplazar el recurso**. Tras el primer `apply` el recurso queda en el state, los planes siguientes no ven cambios y la espera **no vuelve a correr**. Es deliberado:
 
 - **Lo que garantiza:** que `make tf-apply` falle ruidosamente si el bootstrap no dejó la plataforma en pie (manifiesto no publicado en la rama, `directory.include` mal configurado, `ApplicationSet` apuntando a otra rama). Ese es un evento de **creación**.
+- **Cómo lo comprueba:** para cada componente exige `sync.status=Synced` **y** `health.status=Healthy`, no solo la salud. Un error de generación de manifiestos (por ejemplo un `valueFiles` que no existe en la rama) deja `sync=Unknown` con `health=Healthy`, así que esperar solo por `health` lo daría por bueno. Si agota el tiempo, imprime las condiciones de la `Application` (donde Argo deja el `ComparisonError` con el mensaje exacto).
 - **Lo que no garantiza:** el estado del clúster en el día 2, y no debería. Un `Progressing` transitorio (un rollout en curso, un pod reiniciando, un HPA escalando) no es un fallo de infraestructura; hacer fallar `terraform apply` por eso acopla dos responsabilidades distintas.
 
 | Si se quiere… | Cómo |
@@ -2982,11 +3047,11 @@ Regla de orden: **la etiqueta va antes que los pods**. Si se instala primero, el
 
 | Componente | Namespace | Nivel | Manual | Terraform | Argo CD |
 |------------|-----------|-------|--------|-----------|---------|
-| OpenEBS | `openebs` | **privileged, obligatorio** | `kubectl apply -f k8s/openebs-namespace.yaml` y después `helm upgrade --install` **sin** `--create-namespace` | el mismo manifiesto vía `kubectl_manifest` + `create_namespace = false` en el `helm_release` | `managedNamespaceMetadata.labels` + `CreateNamespace=true` |
+| OpenEBS | `openebs` | **privileged, obligatorio** | `kubectl apply -f k8s/bootstrap/config/openebs-namespace.yaml` y después `helm upgrade --install` **sin** `--create-namespace` | el mismo manifiesto vía `kubectl_manifest` + `create_namespace = false` en el `helm_release` | `managedNamespaceMetadata.labels` + `CreateNamespace=true` |
 | cert-manager y trust-manager | `cert-manager` | restricted, opcional | `kubectl label ns cert-manager ...` antes o después de instalar | namespace con `metadata.labels` y `create_namespace = false` | `managedNamespaceMetadata` |
-| ESO y VSO | `external-secrets`, `vault-secrets-operator` | restricted, opcional | añadir `metadata.labels` en `k8s/eso-namespace.yaml` y `k8s/vso-namespace.yaml` | esos manifiestos ya los aplica Terraform | `managedNamespaceMetadata` |
+| ESO y VSO | `external-secrets`, `vault-secrets-operator` | restricted, opcional | añadir `metadata.labels` en `k8s/bootstrap/config/eso-namespace.yaml` y `k8s/bootstrap/config/vso-namespace.yaml` | esos manifiestos ya los aplica Terraform | `managedNamespaceMetadata` |
 | Argo CD, Argo Rollouts, Reloader, OpenFeature Operator | `argocd`, `argo-rollouts`, `reloader`, `open-feature-operator-system` | restricted, opcional | `kubectl label ns ...` | namespace con labels y `create_namespace = false` | `managedNamespaceMetadata` en cada Application |
-| cloudflared | `cloudflare-tunnel-system` | restricted, opcional | editar `k8s/deployments/cloudflare-tunnel/namespace.yaml` | ese manifiesto ya lo aplica Terraform | `managedNamespaceMetadata` |
+| cloudflared | `cloudflare-tunnel-system` | restricted, opcional | editar `k8s/bootstrap/deployments/cloudflare-tunnel/namespace.yaml` | ese manifiesto ya lo aplica Terraform | `managedNamespaceMetadata` |
 | `kube-system`, `gateway-api-system`, `shared-ops` y namespaces de aplicaciones | — | baseline, default | **nada** | **nada** | **nada** |
 
 Para el enfoque GitOps, el campo que hace el trabajo es `managedNamespaceMetadata`:
@@ -3156,13 +3221,13 @@ Para eso, ejecutamos los siguientes comandos:
 
 ```sh
 # Creamos el namespace
-kubectl apply -f k8s/external-auth-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/external-auth-namespace.yaml
 
 # Creamos la ServiceAccount del Reviewer y su respectivo token
-kubectl apply -f k8s/vault-token-reviewer-setup.yaml
+kubectl apply -f k8s/bootstrap/config/vault-token-reviewer-setup.yaml
 ```
 
-Cabe recalcar que a partir de Kubernetes 1.24+, las Service Accounts ya no guardan un token estático y permanente en un objeto tipo `Secret`, por eso, como se puede apreciar en el archivo `k8s/vault-token-reviewer-setup.yaml`, tuvimos que crear explícitamente un secreto de larga duración de tipo `kubernetes.io/service-account-token`.
+Cabe recalcar que a partir de Kubernetes 1.24+, las Service Accounts ya no guardan un token estático y permanente en un objeto tipo `Secret`, por eso, como se puede apreciar en el archivo `k8s/bootstrap/config/vault-token-reviewer-setup.yaml`, tuvimos que crear explícitamente un secreto de larga duración de tipo `kubernetes.io/service-account-token`.
 
 Después de esto, podemos ejecutar los siguientes comandos para obtener los datos que necesitamos para configurar el método de autenticación de Kubernetes en Vault (en el [README de Vault](VAULT_README.md#3-extraer-datos-para-configurar-la-autenticaci%C3%B3n-en-vault) mostramos cómo usar estos datos):
 
@@ -3211,20 +3276,20 @@ Para crear este `CronJob` ejecutamos los siguientes comandos:
 ```sh
 # 1. Crear los namespaces
 # Creamos el namespace donde correrá el job
-kubectl apply -f k8s/shared-ops-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/shared-ops-namespace.yaml
 # Creamos los namespaces donde se insalarán posteriormente los operadores ESO y VSO, ya
 # que dentro de ellos crearemos el ConfigMap y Secret con el certificado TLS de Vault.
 # Además en estos también crearemos el RoleBinding que necesita la ServiceAccount del Job
-kubectl apply -f k8s/eso-namespace.yaml
-kubectl apply -f k8s/vso-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/eso-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/vso-namespace.yaml
 
 # 2. Crear y Asignar permisos mediante RBAC (Role-Based Access Control)
 # El CronJob necesita permisos exclusivos para actualizar el ConfigMap y el Secert que
 # leen los operadores ESO y VSO
-kubectl apply -f k8s/vault-cert-syncer-rbac.yaml
+kubectl apply -f k8s/bootstrap/config/vault-cert-syncer-rbac.yaml
 
 # 3. Crear el CronJob (tarea programada) que ejecutará los jobs cada 8 horas
-kubectl apply -f k8s/deployments/vault-cert-syncer-cronjob.yaml
+kubectl apply -f k8s/bootstrap/deployments/vault-cert-syncer-cronjob.yaml
 
 # Si revisamos la lista de configmaps y secrets, podemos
 # apreciar que aún no existe uno llamado 'vault-ca-cert'
@@ -3282,7 +3347,7 @@ helm repo update
 # Instalamos
 helm upgrade --install external-secrets external-secrets/external-secrets --version 2.9.0 \
   --namespace external-secrets \
-  -f k8s/deployments/eso-values.yaml
+  -f k8s/bootstrap/deployments/eso-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -3308,7 +3373,7 @@ helm repo update
 # Instalamos
 helm upgrade --install vault-secrets-operator hashicorp/vault-secrets-operator --version 1.5.1 \
    --namespace vault-secrets-operator \
-   -f k8s/deployments/vso-values.yaml
+   -f k8s/bootstrap/deployments/vso-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -3335,14 +3400,14 @@ Así pues, ejecutamos entonces los siguientes comandos:
 
 ```sh
 # Creamos la Conexión Global
-kubectl apply -f k8s/vso-vault-connection.yaml
+kubectl apply -f k8s/bootstrap/config/vso-vault-connection.yaml
 
 # Validamos que se haya creado el recurso 'vault-connection'
 # Debe quedar HEALTHY=True y READY=True
 kubectl get vaultconnections -n vault-secrets-operator -o wide
 
 # Creamos nuestro Configuración de Autenticación Global
-kubectl apply -f k8s/vso-vault-auth-global.yaml
+kubectl apply -f k8s/bootstrap/config/vso-vault-auth-global.yaml
 
 # Validamos que se haya creado el recurso 'vault-auth-global-eljavatar-k8s'
 # En este caso no vemos ningún estado, ya que un VaultAuthGlobal como tal no realiza
@@ -3403,7 +3468,7 @@ Si se requiere que este tipo de acciones también estén orquestadas por el fluj
 
 #### ¿Por qué Argo CD es la opción ideal en este Homelab?
 
-1. **Ya usamos el ecosistema Argo:** instalamos **Argo Rollouts** ([`k8s/deployments/argo-rollouts-values.yaml`](k8s/deployments/argo-rollouts-values.yaml)), así que compartimos CRDs (`argoproj.io`), convenciones de `nodeSelector`/recursos y la CLI (`kubectl argo rollouts`). Sumar Argo CD es sumar el mismo modelo mental, no una tecnología nueva.
+1. **Ya usamos el ecosistema Argo:** instalamos **Argo Rollouts** ([`k8s/bootstrap/deployments/argo-rollouts-values.yaml`](k8s/bootstrap/deployments/argo-rollouts-values.yaml)), así que compartimos CRDs (`argoproj.io`), convenciones de `nodeSelector`/recursos y la CLI (`kubectl argo rollouts`). Sumar Argo CD es sumar el mismo modelo mental, no una tecnología nueva.
 2. **Es el único "operador" con interfaz propia:** para un Homelab administrado por una sola persona, ver gráficamente el árbol de aplicaciones, el estado de sincronización y el diff de un commit ahorra mucho tiempo frente a Flux (que es puramente CLI/CRD).
 3. **`ApplicationSet` resuelve el objetivo de "instalar todo lo demás sin intervención humana":** con generadores `git` (directorios) o `list`, cada nuevo componente que se agregue al repositorio se registra solo, sin escribir N objetos `Application` a mano.
 4. **Encaja con el borde del clúster:** el chart soporta `server.httproute` (Gateway API), que es exactamente lo que ya tenemos montado con Cilium y el certificado wildcard `*.eljavatar.home` de la CA interna.
@@ -3443,7 +3508,7 @@ El chart `argo-cd` no instala una sola cosa: despliega varios controladores con 
 
 #### Decisiones de configuración para este Homelab
 
-Todas están reflejadas en [`k8s/deployments/argo-cd-values.yaml`](k8s/deployments/argo-cd-values.yaml):
+Todas están reflejadas en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml):
 
 1. **Una sola réplica por componente:** Argo CD es, junto con el stack de observabilidad, lo más pesado del clúster. Con ~290m de CPU y ~830Mi de *requests* totales cabe holgadamente en un nodo de 11GiB, pero no justifica HA para un único operador humano.
 2. **Colocación en `worker-ops-02` (`custom-role: ops`):** Es el nodo de operaciones (cert-manager, ESO, VSO, Cilium operator, Descheduler, Reloader, Argo Rollouts dashboard). Además, VSO corre ahí y es quien generará el Secret `argocd-repo-creds` desde Vault. Al agregar la tercera Mini PC solo se cambia `global.nodeSelector` (o se descomenta `kubernetes.io/hostname`), sin tocar el resto de la configuración.
@@ -3478,14 +3543,14 @@ kubernetes-homelab/
 │       │   └── config.yaml
 │       └── reloader/
 │           └── config.yaml
-├── k8s/deployments/                   # values.yaml reutilizados por Terraform y por Argo CD
+├── k8s/bootstrap/deployments/                   # values.yaml reutilizados por Terraform y por Argo CD
 ├── terraform/
 └── ...
 ```
 
-Usamos el nombre `gitops/` ya que es el más claro; usar `argocd/` se confundiría con los manifiestos de instalación de Argo CD (que ya están en [`k8s/deployments/argo-cd-values.yaml`](k8s/deployments/argo-cd-values.yaml)) y `gitops/argocd/` añadiría un nivel innecesario teniendo en cuenta que no tengo planeado agregar sistemas de GitOps adicionales (como por ejemplo FluxCD).
+Usamos el nombre `gitops/` ya que es el más claro; usar `argocd/` se confundiría con los manifiestos de instalación de Argo CD (que ya están en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml)) y `gitops/argocd/` añadiría un nivel innecesario teniendo en cuenta que no tengo planeado agregar sistemas de GitOps adicionales (como por ejemplo FluxCD).
 
-Los `values.yaml` **no se duplican**: los `Application` que veremos más adelante los leen del mismo `k8s/deployments/` con el patrón de múltiples `sources` (`ref: values`). Si más adelante un componente pasa a ser 100 % propiedad de Argo CD, sus valores se podrían mover a `gitops/apps/<componente>/values.yaml` sin tocar nada más.
+Los `values.yaml` **no se duplican**: los `Application` que veremos más adelante los leen del mismo `k8s/bootstrap/deployments/` con el patrón de múltiples `sources` (`ref: values`). Si más adelante un componente pasa a ser 100 % propiedad de Argo CD, sus valores se podrían mover a `gitops/apps/<componente>/values.yaml` sin tocar nada más.
 
 #### Paso 1: Preparar las credenciales del administrador en Vault
 
@@ -3536,7 +3601,7 @@ export ARGOCD_ADMIN_PASSWORD_HASH="$(vault kv get -field=admin_password_hash sec
 # Instalamos (Chart 10.10.5 -> App v3.5.5)
 helm upgrade --install argo-cd argo/argo-cd --version 10.10.5 \
   -n argocd --create-namespace \
-  -f k8s/deployments/argo-cd-values.yaml \
+  -f k8s/bootstrap/deployments/argo-cd-values.yaml \
   --set-string configs.secret.argocdServerAdminPassword="$ARGOCD_ADMIN_PASSWORD_HASH" \
   --set-string configs.secret.argocdServerAdminPasswordMtime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
@@ -3556,7 +3621,7 @@ helm upgrade --install argo-cd argo/argo-cd --version 10.10.5 \
 > # El .tpl se renderiza a un archivo temporal y solo se pasa como segundo '-f'
 > export $(cat .env | xargs) && envsubst < .argo-cd-secret-values.yaml.tpl > .argo-cd-secret-values.yaml
 > helm upgrade --install argo-cd argo/argo-cd --version 10.10.5 -n argocd --create-namespace \
->   -f k8s/deployments/argo-cd-values.yaml -f .argo-cd-secret-values.yaml
+>   -f k8s/bootstrap/deployments/argo-cd-values.yaml -f .argo-cd-secret-values.yaml
 > ```
 
 ##### Consumo de recursos y migración futura a la tercera Mini PC
@@ -3636,7 +3701,7 @@ data: "404 page not found\n"
 
 Ese `404 page not found` es el `http.ServeMux` de Go del `argocd-server` el cual indica que la petición llega como **HTTP/1.1** a una ruta que solo existe como gRPC (`/session.SessionService/Create`).
 
-Esto se suele resolver mediante 2 pasos (los cuales ya aplicamos desde nuestro archivo de values que usamos para la instalación `k8s/deployments/argo-cd-values.yaml`):
+Esto se suele resolver mediante 2 pasos (los cuales ya aplicamos desde nuestro archivo de values que usamos para la instalación `k8s/bootstrap/deployments/argo-cd-values.yaml`):
 
 **1) Publicar un puerto h2c:** El chart expone un segundo puerto del Service con `appProtocol: kubernetes.io/h2c`, que es lo que Cilium usa para hablar HTTP/2 claro (h2c) con el pod:
 
@@ -3678,11 +3743,11 @@ Envoy usa la **primera coincidencia**, así que el gRPC terminaría igualmente e
 Requisitos (ya cumplidos en este repositorio):
 
 1. `server.insecure: true` — sin esto el chart no renderiza el puerto h2c.
-2. `gatewayAPI.enableAlpn: true` y `gatewayAPI.enableAppProtocol: true` en [`k8s/deployments/cilium-values.yaml`](k8s/deployments/cilium-values.yaml:102).
-3. CRD `GRPCRoute` instalado (canal *standard* de Gateway API v1.4.1, [`standard-install.yaml`](k8s/gateway-api-crds/v1.4.1/standard-install.yaml:4132)).
+2. `gatewayAPI.enableAlpn: true` y `gatewayAPI.enableAppProtocol: true` en [`k8s/bootstrap/deployments/cilium-values.yaml`](k8s/bootstrap/deployments/cilium-values.yaml:102).
+3. CRD `GRPCRoute` instalado (canal *standard* de Gateway API v1.4.1, [`standard-install.yaml`](k8s/bootstrap/gateway-api-crds/v1.4.1/standard-install.yaml:4132)).
 4. El hostname de gRPC debe resolver a la IP del Gateway: `argocd-grpc.eljavatar.home` → `192.168.0.70` (DNS local o `/etc/hosts`).
 
-Configuración aplicada en [`k8s/deployments/argo-cd-values.yaml`](k8s/deployments/argo-cd-values.yaml):
+Configuración aplicada en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml):
 
 ```yaml
 server:
@@ -4096,7 +4161,7 @@ spec:
       helm:
         releaseName: descheduler
         valueFiles:
-          - $values/k8s/deployments/descheduler-values.yaml
+          - $values/k8s/bootstrap/deployments/descheduler-values.yaml
     - repoURL: https://github.com/eljavatar/kubernetes-homelab
       targetRevision: main
       ref: values          # 'ref' no puede combinarse con 'chart' en la misma source
@@ -4148,7 +4213,7 @@ namespace: reloader
 chartRepo: https://stakater.github.io/stakater-charts
 chart: reloader
 chartVersion: 2.2.17
-valuesFile: k8s/deployments/reloader-values.yaml
+valuesFile: k8s/bootstrap/deployments/reloader-values.yaml
 syncWave: "40"
 ```
 
@@ -4326,7 +4391,7 @@ namespace: reloader
 chartRepo: https://stakater.github.io/stakater-charts
 chart: reloader
 chartVersion: 2.2.17
-valuesFile: k8s/deployments/reloader-values.yaml
+valuesFile: k8s/bootstrap/deployments/reloader-values.yaml
 syncWave: "40"
 layer: base
 ```
@@ -4476,7 +4541,7 @@ Un health check personalizado **no ordena nada** y **no puede consultar otras ap
 Ejemplo para un CRD de OpenFeature:
 
 ```yaml
-# k8s/deployments/argo-cd-values.yaml -> configs.cm
+# k8s/bootstrap/deployments/argo-cd-values.yaml -> configs.cm
 configs:
   cm:
     # La clave va entre comillas por los puntos del grupo
@@ -4625,11 +4690,11 @@ Sin embargo, como hemos visto previamente, en este Homelab las aplicaciones de c
 
 Así que esta opción solo es recomendable si el `Application` tiene un único source.
 
-Una opción alternativa sería que el `values.yaml` esté en la misma ruta del `application.yaml`, para que de esa forma en el manifiesto, a la propiedad `valueFiles` en vez de pasarle algo como `$values/k8s/deployments/mi-app-values.yaml` (donde `$values` es la referencia al segundo source que causa el conflicto de multi-source), se le pasaría algo como `mi-app/mi-app-values.yaml` (se le pasaría con la carpeta ya que esta ruta es relativa al directorio definido en la propiedad `spec.source.path`, que en nuestro caso definimos en el root con el valor `gitops/apps`). Sin embargo, hay que tener en cuenta que esto implicaría duplicar los archivos `values.yaml` que ya existen en la carpete `k8s/deployments`.
+Una opción alternativa sería que el `values.yaml` esté en la misma ruta del `application.yaml`, para que de esa forma en el manifiesto, a la propiedad `valueFiles` en vez de pasarle algo como `$values/k8s/bootstrap/deployments/mi-app-values.yaml` (donde `$values` es la referencia al segundo source que causa el conflicto de multi-source), se le pasaría algo como `mi-app/mi-app-values.yaml` (se le pasaría con la carpeta ya que esta ruta es relativa al directorio definido en la propiedad `spec.source.path`, que en nuestro caso definimos en el root con el valor `gitops/apps`). Sin embargo, hay que tener en cuenta que esto implicaría duplicar los archivos `values.yaml` que ya existen en la carpete `k8s/bootstrap/deployments`.
 
 ##### Flujo recomendado: Application temporal con los values embebidos
 
-`argocd app create` soporta `--values-literal-file`, que **importa el archivo local como bloque literal `helm.values` dentro de la spec**: la Application de prueba no depende de Git y podríamos usar el `values.yaml` de `k8s/deployments/`.
+`argocd app create` soporta `--values-literal-file`, que **importa el archivo local como bloque literal `helm.values` dentro de la spec**: la Application de prueba no depende de Git y podríamos usar el `values.yaml` de `k8s/bootstrap/deployments/`.
 
 ```sh
 # 1. Crear la Application de prueba (sin Git, sin commits)
@@ -4641,7 +4706,7 @@ argocd app create open-feature-operator-test \
   --release-name open-feature-operator \
   --dest-server https://kubernetes.default.svc \
   --dest-namespace open-feature-operator-system \
-  --values-literal-file k8s/deployments/open-feature-values.yaml \
+  --values-literal-file k8s/bootstrap/deployments/open-feature-values.yaml \
   --sync-option CreateNamespace=true \
   --set-finalizer \
   --sync-policy none \
@@ -4656,7 +4721,7 @@ argocd app sync open-feature-operator-test
 kubectl get pods -n open-feature-operator-system -o wide
 
 # 3. Probar un upgrade: cambiar values y/o versión, y volver a sincronizar
-argocd app set open-feature-operator-test --values-literal-file k8s/deployments/open-feature-values.yaml
+argocd app set open-feature-operator-test --values-literal-file k8s/bootstrap/deployments/open-feature-values.yaml
 argocd app set open-feature-operator-test --revision 0.9.4
 argocd app sync open-feature-operator-test
 
@@ -4701,7 +4766,7 @@ El flujo "un solo comando" (`make tf-apply`) que usamos con Terraform choca con 
 
 ```text
 make tf-apply
- ├─ make gitops-publish      -> publica gitops/ + k8s/deployments/ en test/<tema> (un commit, force-with-lease)
+ ├─ make gitops-publish      -> publica gitops/ + k8s/bootstrap/deployments/ en test/<tema> (un commit, force-with-lease)
  └─ terraform apply
      ├─ helm_release.argo_cd
      ├─ kubectl_manifest AppProject
@@ -4731,9 +4796,14 @@ pbcopy < ~/.ssh/id_ed25519_gitops.pub
 # GitHub -> repo -> Settings -> Deploy keys -> Add deploy key
 #   [x] Allow write access
 
-# Verificar y dejar el remote en SSH
+# Verificar
 ssh -i ~/.ssh/id_ed25519_gitops -o IdentitiesOnly=yes -T git@github.com
-git remote set-url origin git@github.com:eljavatar/kubernetes-homelab.git
+
+# Agregamos el remote en SSH
+#git remote set-url origin git@github.com:eljavatar/kubernetes-homelab.git
+# Podríamos setearlo como orígen, pero para flujos automatizados de CI/CD,
+# es mejor práctica agregar otro origen:
+git remote add gitops git@github-gitops:eljavatar/kubernetes-homelab.git
 ```
 
 **2. Publicar y levantar todo:**
@@ -4787,9 +4857,9 @@ git push origin --delete test/gitops-bootstrap
 
 El squash convierte **todos** los commits de prueba en **un único commit** en `main` (que es el mensaje que escribiríamos). Cuando el repo sea estable, la rama de trabajo pasa a ser `main` (`GITOPS_BRANCH=main`) y se puede activar `prune: true` en la raíz.
 
-**5. Componentes posteriores:** Después del bootstrap con Terraform ya no se usaría `make tf-apply`, por lo tanto, después de crear/actualizar el respectivo `gitops/apps/<componente>/application.yaml`, se ejecutaría `make gitops-publish` (o `make tf-apply` si se requiere recrear el clúster) y luego `argocd app sync <componente>`. No hace falta tocar el script ya que este publica por defecto los cambios en las carpetas `gitops/` y `k8s/deployments/`, y puede ajustarse con `GITOPS_PATHS="gitops/ k8s/deployments/ otro/"`.
+**5. Componentes posteriores:** Después del bootstrap con Terraform ya no se usaría `make tf-apply`, por lo tanto, después de crear/actualizar el respectivo `gitops/apps/<componente>/application.yaml`, se ejecutaría `make gitops-publish` (o `make tf-apply` si se requiere recrear el clúster) y luego `argocd app sync <componente>`. No hace falta tocar el script ya que este publica por defecto los cambios en las carpetas `gitops/` y `k8s/bootstrap/deployments/`, y puede ajustarse con `GITOPS_PATHS="gitops/ k8s/bootstrap/deployments/ otro/"`.
 
-> **Values modificados en la rama de pruebas:** las Applications hijas leen sus `values.yaml` con una segunda source `ref: values` que apunta a `main`. Mientras no se cambie ningún `k8s/deployments/*-values.yaml`, esto funcionaría (los archivos ya existen en `main`). Si se está probando un values nuevo, se debería cambiar esa source a la rama de pruebas:
+> **Values modificados en la rama de pruebas:** las Applications hijas leen sus `values.yaml` con una segunda source `ref: values` que apunta a `main`. Mientras no se cambie ningún `k8s/bootstrap/deployments/*-values.yaml`, esto funcionaría (los archivos ya existen en `main`). Si se está probando un values nuevo, se debería cambiar esa source a la rama de pruebas:
 >
 > ```yaml
 >     - repoURL: https://github.com/eljavatar/kubernetes-homelab
@@ -5023,6 +5093,7 @@ Como en el clúster **no** hay operador de Prometheus, no se usan `ServiceMonito
 | Tras `helm uninstall` desaparecieron las Applications | Se instaló sin `crds.keep` | Mantener `crds.keep: true` (ya configurado) y respaldar el repositorio de GitOps |
 | Se borra la Application con `argocd app delete` y **reaparece** segundos o minutos después | La Application está declarada en Git y su dueño la recrea: `root` con `selfHeal: true` (App-of-Apps) o el `ApplicationSet` (ownerReference más generador) | Retirar el manifiesto de Git y hacer `push` **antes** de borrar; ver [Desinstalar un componente gestionado desde Git](#desinstalar-un-componente-gestionado-desde-git) |
 | Se borra el `application.yaml` de Git y **los recursos siguen en el clúster** | `root` tiene `prune: false`, y/o la Application no lleva el finalizer `resources-finalizer.argocd.argoproj.io` | `argocd app delete <app> --cascade --yes` después del `push`, o añadir el finalizer y activar `prune: true` |
+| Una Application del App-of-Apps falla con `failed to generate manifest ... open ... no such file or directory ... values.yaml` y queda `Unknown/Healthy` | Su source con `ref: values` apunta a una revisión distinta de la que sincroniza `root` (típicamente `main` mientras se prueba en `test/<tema>`), y en esa revisión el fichero de values no existe o está en otra ruta | Mover el componente al `ApplicationSet` (que sí recibe la reescritura de rama desde Terraform) y comprobar con `kubectl get application <app> -n argocd -o jsonpath='{.status.conditions}'` |
 
 
 ### Argo Rollouts
@@ -5041,7 +5112,7 @@ helm repo update
 # Instalamos (Chart 2.43.6 -> App v1.10.0)
 helm upgrade --install argo-rollouts argo/argo-rollouts --version 2.43.6 \
   -n argo-rollouts --create-namespace \
-  -f k8s/deployments/argo-rollouts-values.yaml
+  -f k8s/bootstrap/deployments/argo-rollouts-values.yaml
 ```
 
 Para validar la instalación:
@@ -5060,7 +5131,7 @@ kubectl argo rollouts list rollouts -n <namespace>
 
 > **Exposición opcional vía Gateway API:** el chart 2.43.6 soporta nativamente `dashboard.httproute`, por lo que en nuestro caso publicamos el dashboard bajo el Gateway existente en lugar de tener que hacer un `port-forward`, aprovechando el `internal CA` ya configurado (no olvidar agregar la ruta `argorollouts.eljavatar.home` al servicio DNS local que se tenga configurado o en su defecto, al archivo `/etc/hosts`).
 
-> **Nota de integración con Reloader:** si se gestionan Rollouts y se quiere reiniciar pods ante cambios de `ConfigMap`/`Secret`, activar `reloader.isArgoRollouts: true` en `k8s/deployments/reloader-values.yaml`.
+> **Nota de integración con Reloader:** si se gestionan Rollouts y se quiere reiniciar pods ante cambios de `ConfigMap`/`Secret`, activar `reloader.isArgoRollouts: true` en `k8s/bootstrap/deployments/reloader-values.yaml`.
 
 #### Accionables automatizados con base en Métricas de despliegue
 
@@ -5169,7 +5240,7 @@ helm repo update
 # Instalamos
 helm install reloader stakater/reloader --version 2.2.17 \
   --namespace reloader --create-namespace
-  -f k8s/deployments/reloader-values.yaml
+  -f k8s/bootstrap/deployments/reloader-values.yaml
 ```
 
 Para verificar la instalación, ejecutamos:
@@ -5352,7 +5423,7 @@ helm repo update
 # Instalamos
 helm upgrade --install descheduler descheduler/descheduler --version 0.36.0 \
   -n kube-system \
-  -f k8s/deployments/descheduler-values.yaml
+  -f k8s/bootstrap/deployments/descheduler-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -5437,7 +5508,7 @@ helm repo update
 # Instalamos
 helm upgrade --install metrics-server metrics-server/metrics-server --version 3.13.1 \
   -n kube-system \
-  -f k8s/deployments/metrics-server-values.yaml
+  -f k8s/bootstrap/deployments/metrics-server-values.yaml
 ```
 
 Para verificar que se haya creado correctamente, ejecutamos lo siguiente:
@@ -5533,7 +5604,7 @@ helm repo update
 # Instalamos (Chart v0.9.3 -> App v0.9.3)
 helm upgrade --install open-feature-operator openfeature/open-feature-operator --version 0.9.3 \
   -n open-feature-operator-system --create-namespace \
-  -f k8s/deployments/open-feature-values.yaml
+  -f k8s/bootstrap/deployments/open-feature-values.yaml
 ```
 
 Para validar la instalación:
@@ -5810,16 +5881,16 @@ Si al ejecutar el comando con el dominio `.org` obtenemos el mismo error, signif
 
 - **¿Cómo solucionarlo?**
 
-  Debemos modificar el `archivo k8s/cert-letsencrypt-public.yaml` para que use el emisor de producción de Let's Encrypt que en nuestro caso es `letsencrypt-prod-issuer`, y volver a aplicar el manifiesto del certificado:
+  Debemos modificar el `archivo k8s/bootstrap/config/cert-letsencrypt-public.yaml` para que use el emisor de producción de Let's Encrypt que en nuestro caso es `letsencrypt-prod-issuer`, y volver a aplicar el manifiesto del certificado:
 
   ```yaml
-  # En el archivo k8s/cert-letsencrypt-public.yaml
+  # En el archivo k8s/bootstrap/config/cert-letsencrypt-public.yaml
     issuerRef:
       name: letsencrypt-prod-issuer # <-- Cambiamos stage por prod
       kind: ClusterIssuer
   ```
 
-  En cuanto ejecutemos `kubectl apply -f k8s/cert-letsencrypt-public.yaml` y `cert-manager` termine de validar el desafío con Cloudflare (entre unos 30 segundos y 2 minutos), Let's Encrypt emitirá un certificado firmado por su entidad oficial confiable (`CN=YE2` en este caso). A partir de ese milisegundo, el curl hacia `https://playground.eljavatar.org` funcionará perfectamente sin errores, porque la CA de Let's Encrypt ya viene preinstalada de fábrica en nuestro sistema operativo.
+  En cuanto ejecutemos `kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml` y `cert-manager` termine de validar el desafío con Cloudflare (entre unos 30 segundos y 2 minutos), Let's Encrypt emitirá un certificado firmado por su entidad oficial confiable (`CN=YE2` en este caso). A partir de ese milisegundo, el curl hacia `https://playground.eljavatar.org` funcionará perfectamente sin errores, porque la CA de Let's Encrypt ya viene preinstalada de fábrica en nuestro sistema operativo.
 
   De esa forma si volvemos a lanzar el curl, debería mostrarnos información del certificado, con un mensaje `SSL certificate verify ok`:
 
@@ -6439,6 +6510,83 @@ Así pues, procedemos con los siguientes pasos:
    ```sh
    kubectl delete ns canary-demo
    ```
+
+---
+
+
+
+
+
+# Convenciones de organización de manifiestos
+
+Esta sección es la **hoja de ruta** para cualquier despliegue posterior al bootstrap: existe para que añadir una aplicación no obligue a decidir de nuevo dónde va cada cosa.
+
+**La regla de oro**
+
+> **Bootstrap y aplicaciones no se mezclan:** `k8s/bootstrap/` es lo que aplica Terraform; `k8s/apps/` son cargas de trabajo que dependen de él. Si Terraform lo aplica, va en `bootstrap/`; si lo aplica Argo CD como aplicación, va en `apps/`.
+
+### Una carpeta por aplicación
+
+```text
+k8s/apps/
+└── keycloak/
+    ├── README.md            # Cómo se instala y qué necesita
+    ├── namespace.yaml       # SIEMPRE con su label de Pod Security explícito
+    ├── values.yaml          # Values del chart (el caso habitual)
+    ├── charts/              # Solo si hay chart propio
+    ├── manifests/           # Solo si hay YAML sueltos (como k8s/bootstrap/deployments/cloudflare-tunnel/)
+    └── kustomize/           # Solo si se adopta Kustomize
+```
+
+| Caso de la aplicación | Estructura | Cuándo |
+|---|---|---|
+| Chart de terceros + values | `apps/<app>/values.yaml` | El caso habitual |
+| Varios entornos | `apps/<app>/values/{local,prod}.yaml` | Cuando aparezca el segundo entorno |
+| Chart propio | `apps/<app>/charts/<app>/` + `apps/<app>/values.yaml` | Poco frecuente |
+| Manifiestos sueltos | `apps/<app>/manifests/` | Ocasional |
+| Kustomize | `apps/<app>/kustomize/{base,overlays/<env>}` | Solo si se adopta |
+| Helmfile | `apps/<app>/helmfile.yaml` (fichero, **no** carpeta) | Solo si se adopta |
+
+**No se crean carpetas vacías "por si acaso":** una app que solo necesita un `values.yaml` es solo un `values.yaml`. La estructura crece cuando la app la necesita, no antes.
+
+### Dos reglas obligatorias para cada aplicación
+
+1. **`namespace.yaml` con el nivel de Pod Security explícito.** Si la app la despliega Argo CD, el equivalente es `syncPolicy.managedNamespaceMetadata.labels`. Sin esa etiqueta el namespace cae al default (`baseline`) y si algún día se endurece `enforce` la aplicación deja de arrancar. Ver [Pod Security Admission](#pod-security-admission-niveles-matriz-por-componente-y-comprobaciones).
+2. **Un `README.md`** con el comando de instalación y sus dependencias ("requiere el `ClusterIssuer` interno", "requiere PVC de `openebs-hostpath`", requiere algo adicional?). Es lo que evita reconstruir el orden a base de `kubectl get` dentro de seis meses.
+
+### Cómo lo consume Argo CD
+
+Los values de una aplicación se referencian con `ref: values`, igual que los del bootstrap:
+
+```yaml
+sources:
+  - repoURL: https://charts.example.com
+    chart: keycloak
+    targetRevision: 24.0.0
+    helm:
+      valueFiles:
+        - $values/k8s/apps/keycloak/values.yaml
+  - repoURL: https://github.com/eljavatar/kubernetes-homelab
+    targetRevision: main
+    ref: values
+```
+
+Por eso `make gitops-publish` publica `gitops/` **y todo `k8s/`**: si un values vive en `k8s/apps/`, Argo CD no lo verá hasta que esté en la rama.
+
+### Dónde va cada cosa nueva
+
+| Lo que se va a crear | Dónde va |
+|---|---|
+| Un values de Helm para un componente del bootstrap | `k8s/bootstrap/deployments/<componente>-values.yaml` |
+| Un `Namespace`, `Certificate`, `ClusterIssuer` o RBAC del bootstrap | `k8s/bootstrap/config/` |
+| Un `.tpl` que renderiza Terraform | `k8s/bootstrap/templates/` |
+| Un manifiesto de referencia que no se aplica | `k8s/bootstrap/optional/` |
+| Una aplicación nueva | `k8s/apps/<app>/` (con su `namespace.yaml` y su `README.md`) |
+| Una `Application` con spec propia | `gitops/apps/<app>/application.yaml` |
+| Un componente homogéneo (chart + values) | `gitops/generated/<app>/config.yaml` |
+| Un script de apoyo | `scripts/` + target en el `Makefile` |
+| Un script o manifiesto de prueba | `tests/` |
+| Una política custom de Vault | `vault/policies` |
 
 ---
 

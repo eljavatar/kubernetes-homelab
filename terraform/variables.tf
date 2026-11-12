@@ -45,7 +45,7 @@ variable "use_local_iso" {
 
 variable "is_development" {
   type        = bool
-  default     = true
+  default     = false
   description = "Si es true, el clúster arranca en modo permisivo (Desarrollo). Si es false, activa el perfil estricto 'baseline' por defecto (Producción)."
 }
 
