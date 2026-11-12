@@ -86,8 +86,6 @@ En ese orden de ideas, algo importante a tener en cuenta es asignar la cantidad 
 - **Motores de secretos pesados:** El uso del motor *Transit* (cifrado como servicio) consume mucha CPU.
 - **Logs de auditoría:** Si se activa el guardado de logs en archivos dentro del mismo disco, los 15 GB se llenarán rápidamente si hay mucho tráfico.
 
----
-
 
 
 
@@ -628,8 +626,6 @@ Abrimos el navegador en nuestra máquina local (en mi caso, mi Macbook Pro), ing
    vault status
    ```
 
----
-
 
 
 
@@ -793,8 +789,6 @@ Raft Applied Index      5046
 En esta salida podemos ver que `Sealed` ya aparece con valor `false`, ya que después de encender el LXC, el LXC inició Vault y Systemd lo desbloqueó de inmediato.
 
 Además, si hemos seguido todos los pasos hasta aquí, al ejecutar `printenv` también veremos que tenemos configuradas las variables de entorno `VAULT_ADDR` y `VAULT_SKIP_VERIFY`, con lo cual ya tenemos listo el ambiente de nuestro LXC para poder usar la CLI de `vault` sin preocuparnos por el unseal de la bóveda o por tener que agregar variables de entorno.
-
----
 
 
 
@@ -1928,6 +1922,8 @@ Y cada vez que el operador consulte ese path, Vault le devolverá un usuario y c
 
 ### Configurar el Inicio de sesión desde el clúster de Kubernetes
 
+> **Alcance de esta sección:** aquí se documenta el **modelo de operador**, en el que el controlador va a Vault y deja un `Secret` nativo de Kubernetes listo para la aplicación. Existe un segundo modelo —el del **agente dentro del Pod** (Vault Agent Injector o volumen CSI efímero)— en el que el secreto nunca se convierte en un objeto `Secret` y en el que cada réplica puede obtener su propia credencial. La comparación de ambos modelos, con ventajas, desventajas, el caso que justificaría cambiar y un bosquejo de implementación, está en el README principal: [Dos modelos de entrega: el operador escribe un `Secret` o el agente vive dentro del Pod](README.md#dos-modelos-de-entrega-el-operador-escribe-un-secret-o-el-agente-vive-dentro-del-pod).
+
 Como mencionamos anteriormente, las aplicaciones de nuestro clúster de Kubernetes deben autenticarse ante Vault para poder leer los secretos de los almacenes (los Secret engines). Sin embargo, con los operadores como ESO y VSO el enfoque cambia, ya que es el operador quien actúa como intermediario centralizado que extrae los secretos de Vault y los inyecta como Secretos nativos de Kubernetes en cada namespace. Por lo tanto, las aplicaciones nunca se autentican ante Vault en este modelo, es siempre ESO o VSO quien va a Vault, descarga el secreto, y lo escribe como un `Secret` nativo de Kubernetes en el namespace.
 
 De este modo, es el Pod del operador (`external-secrets` para el caso de ESO y `vault-secrets-operator-controller-manager` para el caso de VSO) el único que se autentica contra Vault usando una `ServiceAccount` válida. A continuación veremos cómo realizan este proceso de autenticación cada uno de estos operadores:
@@ -2336,16 +2332,4 @@ kubectl describe certificaterequest -n playground vault-server-cert-<ID_ALEATORI
 ```
 
 ---
-
-
-
-
-
-
-
-
-
-
-
-
 
