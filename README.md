@@ -3302,7 +3302,7 @@ Como podemos apreciar, aún no existe el `ConfigMap` y el `Secret` que necesitar
 ```sh
 # Hacemos una primera ejecución del Job para que se cree el ConfigMap y el Secret
 # en los namespaces de ESO y VSO respectivamente
-kubectl create job first-sync-vault-cert-manual \
+kubectl create job sync-vault-cert-first-manual \
   --from=cronjob/sync-vault-cert \
   -n shared-ops
 
@@ -3314,7 +3314,7 @@ kubectl get jobs -n shared-ops -o wide
 kubectl get pods -n shared-ops -o wide
 
 # Verificamos que no hayan errores en los logs
-kubectl logs -n shared-ops -l job-name=first-sync-vault-cert-manual -f --tail=50
+kubectl logs -n shared-ops -l job-name=sync-vault-cert-first-manual -f --tail=50
 
 # Validamos que en efecto ya existe el configmap y secret 'vault-ca-cert'
 kubectl get configmap -n external-secrets -o wide
@@ -5730,8 +5730,8 @@ Contrato de códigos de salida: **`0`** todo correcto (puede haber `WARN`/`SKIP`
 
 ### Relación con `make gitops-health`
 
-| | `make gitops-health` | `make validate-cluster` |
-|---|---|---|
+| Criterio | `make gitops-health` | `make validate-cluster` |
+|----------|----------------------|-------------------------|
 | Alcance | Solo las `Application` de Argo CD | Todo el clúster (red, TLS, secretos, storage, workloads) |
 | Salud | **Informativa**: avisa pero sale 0 | **Gate**: un `OutOfSync`/`Degraded` es `FAIL` |
 | Uso | Consulta rápida durante el día | Puerta tras `make tf-apply` o clonar el clúster |
@@ -5778,6 +5778,429 @@ Deliberadamente fuera del camino rápido, porque son lentas o **modifican el cl�
 - **Placement por prefijo:** `ops*` matchea `worker-ops-02` y también un futuro `worker-ops-03`, porque el `nodeSelector` es por label y el pod puede caer en cualquiera de los nodos de ese rol.
 - **Componentes condicionales:** si `use_prod_domain=false` no existe el listener público ni su certificado, y esos checks pasan a `SKIP` en lugar de `FAIL`.
 - **Añadir un check:** crear una función `check_*`, llamarla desde su grupo y decidir el veredicto con `ok`/`warn`/`fail`/`skip`. Los datos repetitivos (réplicas, placement, CRDs) están en tablas `id|ns|...` al principio de cada grupo, así que añadir un componente es una línea.
+
+---
+
+
+### Otros componentes según el caso de uso
+
+Este Homelab deja el clúster en el estado que considero mínimo para estar "ready to work": red y borde (Cilium, CoreDNS, Gateway API, cloudflared), confianza TLS (cert-manager, trust-manager, CA interna), secretos fuera de Git (Vault + ESO/VSO), almacenamiento local (OpenEBS), entrega continua (Argo CD + ApplicationSet + Argo Rollouts), ajuste de capacidad básico (metrics-server, HPA, descheduler), feature flags (OpenFeature Operator), actualizar secrets/configmaps sin causar indisponibilidad (reloader) y validación automática ([`scripts/validate-cluster.sh`](scripts/validate-cluster.sh)).
+
+Muchas organizaciones, sin embargo, necesitan **más** desde el bootstrap: dependerá de si gestionan varios clústeres, de si tienen equipos de desarrollo a los que sirven, del sector (regulación) o de si operan cargas con estado. Esta sección es un catálogo de **necesidades** que este clúster **no** cubre, con la herramienta que mejor las resuelve y sus alternativas. **Ninguno de estos componentes está instalado aquí**: se documentan como referencia para quien llegue con otro caso de uso.
+
+> **Sobre la madurez de los proyectos:** la lista prioriza proyectos del ecosistema CNCF, que abarca niveles *Graduated*, *Incubating* y *Sandbox*, y cambian con el tiempo. En lugar de fijar el nivel de cada uno (un estado que puede cambiar en meses), se indica si es proyecto CNCF y se enlaza al [landscape oficial](https://landscape.cncf.io) para consultar su estado actual. Cuando una herramienta **no** es CNCF se indica explícitamente.
+>
+> **Sobre el consumo de recursos:** las cifras son **órdenes de magnitud** para un clúster pequeño (decenas de pods, 3-7 nodos) con los *requests* típicos de cada chart. Los controladores que cachean objetos de la API (Kyverno, Gatekeeper, Velero, OpenCost) escalan con el **número de pods y CRs**, y los que corren por nodo (Falco, agentes de malla, OSDs) escalan con el **número de nodos y discos**.
+
+#### Índice de necesidades
+
+1. [Guardrails de admisión más allá de PSA](#1-guardrails-de-admisi%C3%B3n-ir-m%C3%A1s-all%C3%A1-de-psa) — Kyverno
+2. [Copias de seguridad y recuperación del clúster](#2-copias-de-seguridad-y-recuperaci%C3%B3n-del-cl%C3%BAster) — Velero
+3. [Detección de amenazas en tiempo de ejecución](#3-detecci%C3%B3n-de-amenazas-en-tiempo-de-ejecuci%C3%B3n) — Falco
+4. [Escaneo de vulnerabilidades y auditoría de configuración](#4-escaneo-de-vulnerabilidades-y-auditor%C3%ADa-de-configuraci%C3%B3n) — Trivy Operator
+5. [Firma y procedencia de artefactos](#5-firma-y-procedencia-de-artefactos-supply-chain) — Sigstore / cosign
+6. [Autoscaling de cargas por eventos](#6-autoscaling-de-cargas-por-eventos) — KEDA
+7. [Aprovisionamiento y escalado de nodos](#7-aprovisionamiento-y-escalado-de-nodos) — Cluster API
+8. [Almacenamiento replicado, snapshots y RWX](#8-almacenamiento-replicado-con-snapshots-y-rwx) — Rook-Ceph
+9. [Registro de imágenes privado](#9-registro-de-im%C3%A1genes-privado) — Harbor
+10. [Multi-tenancy por equipos](#10-multi-tenancy-por-equipos) — Capsule
+11. [DNS automático de los servicios publicados](#11-dns-autom%C3%A1tico-para-los-servicios-publicados) — ExternalDNS
+12. [Identidad criptográfica de las cargas (SPIFFE)](#12-identidad-criptogr%C3%A1fica-de-las-cargas-de-trabajo-spiffe) — SPIRE
+13. [Malla de servicios, mTLS y control L7](#13-malla-de-servicios-mtls-y-control-de-tr%C3%A1fico-l7) — Istio / Linkerd
+14. [Promoción de artefactos entre entornos](#14-promoci%C3%B3n-de-artefactos-entre-entornos) — Kargo
+15. [Gestión de varios clústeres](#15-gesti%C3%B3n-de-varios-cl%C3%BAsteres) — Karmada
+16. [Ingeniería del caos](#16-ingenier%C3%ADa-del-caos) — Chaos Mesh
+17. [Visibilidad de coste y right-sizing](#17-visibilidad-de-coste-y-right-sizing) — OpenCost
+18. [Procesamiento batch, colas y cuotas](#18-procesamiento-batch-colas-y-cuotas-de-trabajo) — Kueue
+19. [Portal de autoservicio para los equipos](#19-portal-de-autoservicio-para-los-equipos) — Backstage
+20. [Conformidad del clúster](#20-conformidad-del-cl%C3%BAster) — Sonobuoy
+
+Y dos apartados de cierre: [propósitos deliberadamente fuera de esta lista](#prop%C3%B3sitos-deliberadamente-fuera-de-esta-lista) y [cómo decidir qué instalar](#c%C3%B3mo-decidir-qu%C3%A9-instalar-y-qu%C3%A9-no).
+
+#### 1. Guardrails de admisión: ir más allá de PSA
+
+**En qué consiste la necesidad:** Un *admission controller* de políticas evalúa cada recurso **antes** de que se persista en etcd y puede validarlo, mutarlo o generar otros recursos. La necesidad surge cuando la organización tiene convenciones que el clúster debe hacer cumplir por sí mismo: prohibir `:latest`, exigir `resources.requests` y `limits`, restringir registros de imágenes permitidos, exigir labels de coste/propietario, generar automáticamente una `NetworkPolicy` deny-all o una `ResourceQuota` por namespace, o verificar que la imagen está firmada.
+
+**Por qué conviene cubrirla en el clúster:** Es la única forma de que una convención se cumpla **sin depender de la disciplina humana**. Sin políticas de admisión, el revisor del PR se convierte en el motor de políticas: lento, inconsistente y sin registro.
+
+**Qué implica no cubrirla.** PSA (lo que ya tenemos) solo evalúa campos del `podSpec` en tres niveles cerrados: no puede exigir labels, ni recursos, ni registros, ni firmas, ni reglas que crucen objetos. Las desviaciones aparecen mucho después (una factura, una auditoría, un incidente) y corregirlas cuesta un rediseño en lugar de un rechazo en el `apply`.
+
+**Dónde es crítica o casi indispensable:** Clústeres multi-equipo o multi-tenant; sectores regulados (PCI-DSS, HIPAA, SOC 2) donde hay que demostrar controles; plataformas internas que sirven a muchos desarrolladores; cualquier organización que ya haya sufrido "el `deployment` que se comió la memoria del nodo".
+
+**Por qué no lo cubre el stack actual:** PSA es un conjunto fijo de controles de seguridad del pod; no es extensible ni puede validar imágenes, labels o cuotas.
+
+**Herramienta principal:** **Kyverno** (proyecto CNCF, *Graduated* desde marzo de 2026) — motor de políticas nativo de Kubernetes: las políticas son YAML, sin lenguaje nuevo, y cubre validación, mutación, generación de recursos, verificación de firmas de imágenes y reportes de cumplimiento. [Sitio](https://kyverno.io) · [GitHub](https://github.com/kyverno/kyverno) · [ArtifactHub](https://artifacthub.io/packages/helm/kyverno/kyverno).
+
+*Consumo orientativo:* ~250-800 mCPU y ~256 MiB-1 GiB (3 controladores: admission, background y reports). Crece con el número de pods evaluados y con los reportes que se retengan.
+
+**Alternativas:** [OPA Gatekeeper](https://open-policy-agent.github.io/gatekeeper) (políticas en Rego, más potente y más curva de aprendizaje) y [Kubewarden](https://www.kubewarden.io) (políticas compiladas a WebAssembly, multi-lenguaje).
+
+#### 2. Copias de seguridad y recuperación del clúster
+
+**En qué consiste la necesidad:** Poder restaurar **el estado del clúster y los datos de los volúmenes** ante un borrado accidental, una migración o un desastre: manifiestos, CRs, Secrets y el contenido de las `PersistentVolumeClaim`.
+
+**Por qué conviene cubrirla en el clúster:** GitOps respalda los manifiestos (están en Git) y Talos respalda etcd, pero **ninguno respalda los datos**: un `PersistentVolumeClaim` borrado o un nodo perdido se lleva la base de datos por delante. La copia es lo que convierte "recrear el clúster" en un procedimiento rutinario en lugar de un incidente.
+
+**Qué implica no cubrirla:** No hay objetivo de recuperación posible: ni RPO (cuántos datos se pueden perder) ni RTO (cuántos se tardaría en volver). El primer borrado accidental de un namespace con una DB es irrecuperable, y las auditorías suelen pedir evidencias de backup y **pruebas de restauración**.
+
+**Dónde es crítica o casi indispensable:** Cualquier carga con estado (bases de datos, colas con persistencia, registros de objetos), sectores regulados, y organizaciones que ofrecen un SLA. En un homelab es recomendable en cuanto hay algo que no se pueda regenerar.
+
+**Por qué no lo cubre el stack actual:** OpenEBS en modo `hostpath` guarda los datos en el nodo; no hay replicación ni copia fuera de él, y `terraform destroy` no toca los PVCs pero sí puede perder el nodo.
+
+**Herramienta principal:** **Velero** — copia y restaura recursos del clúster y volúmenes (con complementos de *snapshot* o con Restic/Kopia para *file-level*), permite migrar entre clústeres y programar retenciones. [Sitio](https://velero.io) · [GitHub](https://github.com/vmware-tanzu/velero) · [ArtifactHub](https://artifacthub.io/packages/helm/vmware-tanzu/velero).
+
+*Consumo orientativo:* ~100-500 mCPU y ~128-512 MiB fijos; el coste real son los Jobs de backup y el almacenamiento del repositorio (S3/NFS).
+
+**Alternativas:** [K8up](https://k8up.io) (backups con Restic y CRDs, más ligero), [VolSync](https://volsync.readthedocs.io) (replicación de PVCs entre clústeres con Restic/Syncthing) y [Kanister](https://kanister.io) (backups *application-consistent* de bases de datos).
+
+#### 3. Detección de amenazas en tiempo de ejecución
+
+**En qué consiste la necesidad:** Observar lo que los contenedores **hacen** una vez arrancados (llamadas al sistema, ejecución de shells, escritura en rutas del sistema, conexiones salientes inesperadas) y alertar cuando ese comportamiento se sale de lo esperado.
+
+**Por qué conviene cubrirla en el clúster:** Las políticas de admisión son **preventivas**: deciden qué se despliega, no qué ocurre después. Un pod perfectamente compliant (imagen firmada, non-root, `drop: ALL`) puede estar ejecutando una vulnerabilidad y lanzar un `curl | sh` o un minero de criptomonedas.
+
+**Qué implica no cubrirla:** No hay detección de compromiso: nos enteraríamos por la factura del proveedor, por un ransomware o por un aviso externo. Tampoco hay evidencias para un análisis forense (qué proceso, en qué pod, cuándo).
+
+**Dónde es crítica o casi indispensable:** Cargas expuestas a Internet, cualquier organización con un SOC o con obligación de detección (NIS2, ISO 27001), y clústeres que ejecutan código de terceros o imágenes de muchos equipos.
+
+**Por qué no lo cubre el stack actual:** Cilium aporta *visibilidad de red* (Hubble) y aplica políticas L3/L4, pero no analiza syscalls ni comportamiento de procesos.
+
+**Herramienta principal:** **Falco** (proyecto CNCF, *Graduated*) — detección de amenazas basada en reglas sobre eventos de kernel (eBPF o módulo) y plugins de Kubernetes/audit; alerta a stdout, gRPC, syslog, Slack, etc. [Sitio](https://falco.org) · [GitHub](https://github.com/falcosecurity/falco) · [ArtifactHub](https://artifacthub.io/packages/helm/falcosecurity/falco).
+
+*Consumo orientativo:* al ser un DaemonSet, ~50-150 mCPU y ~256-512 MiB **por nodo**; se suma Falcosidekick si se enrutan alertas.
+
+**Alternativas:** [Tetragon](https://tetragon.io) (eBPF, del proyecto Cilium, con *enforcement* además de detección) y [KubeArmor](https://kubearmor.io) (políticas de *least privilege* a nivel de proceso, también eBPF/AppArmor).
+
+#### 4. Escaneo de vulnerabilidades y auditoría de configuración
+
+**En qué consiste la necesidad:** Saber, de forma continua, qué CVEs (*Common Vulnerabilities and Exposures*) tienen las imágenes que están corriendo y si los recursos del clúster cumplen una línea base (CIS Kubernetes Benchmark, configuración de `securityContext`, RBAC excesivo).
+
+**Por qué conviene cubrirla en el clúster:** Una imagen "limpia" en el momento del build deja de serlo la semana siguiente. Escanear en CI cubre el artefacto, pero no lo que realmente está desplegado ni los hallazgos que aparecen después.
+
+**Qué implica no cubrirla:** Se despliegarían imágenes con vulnerabilidades conocidas sin saberlo, y no hay inventario para responder a "¿tenemos `log4j` en producción?" en menos de un día. En una auditoría, la respuesta "lo miramos a mano" no se sostiene.
+
+**Dónde es crítica o casi indispensable:** Sectores regulados con plazos de parcheo, organizaciones que publican software, y cualquier equipo con más de un puñado de imágenes.
+
+**Por qué no lo cubre el stack actual:** no hay escaneo continuo; el `Trivy`/`grype` de CI no ve lo desplegado ni la configuración del clúster.
+
+**Herramienta principal:** **Trivy Operator** (de Aqua Security; **no** es proyecto CNCF, aunque Trivy sí está muy extendido) — escanea imágenes, configuración de workloads, RBAC y expone los resultados como CRDs para consultarlos o exportarlos. [GitHub](https://github.com/aquasecurity/trivy-operator) · [ArtifactHub](https://artifacthub.io/packages/helm/trivy-operator/trivy-operator).
+
+*Consumo orientativo:* operador ~100-200 mCPU y ~256-512 MiB; el coste real son los **Jobs de escaneo** (picos de CPU al escanear todas las imágenes y al actualizar la base de datos de CVEs).
+
+**Alternativas:** [Kubescape](https://kubescape.io) (CNCF, con postura de seguridad y CIS integrados), [kube-bench](https://github.com/aquasecurity/kube-bench) (solo CIS del nodo/control plane) y [Polaris](https://polaris.docs.fairwinds.com) (validación de buenas prácticas como *webhook*).
+
+#### 5. Firma y procedencia de artefactos (supply chain)
+
+**En qué consiste la necesidad:** Poder demostrar que la imagen que se despliega **es la que se construyó** en un pipeline, por quién y a partir de qué código: firma criptográfica, atestaciones de *build* (metadatos con detalles sobre el proceso de construcción) y SBOM (librerías, módulos y código de terceros que componen el artefacto).
+
+**Por qué conviene cubrirla en el clúster:** Kubernetes no tiene concepto de "imagen de confianza": `image: repo/app:1.4.2` es solo una cadena. Si alguien con acceso al registro publica una imagen distinta bajo la misma etiqueta, el clúster la ejecutará sin protestar. La firma convierte esa cadena en una decisión verificable en la admisión.
+
+**Qué implica no cubrirla:** No hay forma de distinguir una imagen propia de una réplica maliciosa o de un *tag* sobrescrito. Es la brecha clásica entre "el build es seguro" y "lo que corre es lo que se construyó", y cada vez más requisitos (Órdenes ejecutivas, SLSA, clientes enterprise) piden evidencias de procedencia.
+
+**Dónde es crítica o casi indispensable:** Organizaciones que distribuyen software a clientes, entornos regulados, y clústeres que consumen imágenes de varios equipos o de terceros.
+
+**Por qué no lo cubre el stack actual:** no hay firma ni verificación; el registro público tampoco la exige.
+
+**Herramienta principal:** **Sigstore / cosign** (**no** es CNCF: Sigstore es un proyecto de OpenSSF) — firma sin gestión de claves (con OIDC y transparencia) y verificación en la admisión, normalmente **junto a Kyverno** (`verifyImages`) o Gatekeeper. [Sitio](https://www.sigstore.dev) · [GitHub](https://github.com/sigstore/cosign).
+
+*Consumo orientativo:* `cosign` es una **CLI**: 0 recursos en el clúster. Si se usa un controlador de políticas de firma, ~50-150 mCPU y ~128-256 MiB.
+
+**Alternativas:** [Notary Project / Notation](https://notaryproject.dev) (CNCF) y [TUF](https://theupdateframework.io) (CNCF) para la raíz de confianza de las actualizaciones; en la práctica, la verificación se hace con Kyverno o Gatekeeper.
+
+#### 6. Autoscaling de cargas por eventos
+
+**En qué consiste la necesidad:** Escalar réplicas en función de una señal **externa** al pod: longitud de una cola, *lag* de un consumidor de Kafka, peticiones por segundo en un endpoint, jobs pendientes en un sistema batch.
+
+**Por qué conviene cubrirla en el clúster:** El HPA nativo escala por CPU/memoria (o métricas custom vía *adapter*), y un consumidor de colas suele estar **ocioso en CPU mientras la cola crece**. Sin esa señal, o se sobredimensiona de forma permanente (coste) o se acumula retraso (latencia e incumplimiento de SLA).
+
+**Qué implica no cubrirla:** Pagar por capacidad que no se usa o incumplir SLOs en los picos; y en el caso de consumidores de colas, *backlogs* que crecen más rápido de lo que se drenan.
+
+**Dónde es crítica o casi indispensable:** Arquitecturas event-driven, procesamiento batch/nocturno, y organizaciones con coste cloud sensible, donde el sobredimensionamiento se factura cada mes.
+
+**Por qué no lo cubre el stack actual:** metrics-server solo expone CPU/memoria de pods y nodos; no hay adaptador de métricas externas.
+
+**Herramienta principal:** **KEDA** (proyecto CNCF, *Graduated*) — *scalers* para decenas de fuentes (Kafka, RabbitMQ, Redis Streams, Prometheus, cron, colas cloud) y capacidad de escalar **a cero**. [Sitio](https://keda.sh) · [GitHub](https://github.com/kedacore/keda) · [ArtifactHub](https://artifacthub.io/packages/helm/kedacore/keda).
+
+*Consumo orientativo:* ~80-200 mCPU y ~128-256 MiB en total (operador + servidor de métricas + adaptador).
+
+**Alternativas:** HPA nativo con adaptadores de métricas custom (Prometheus Adapter) y [VPA](https://github.com/kubernetes-sigs/vertical-pod-autoscaler) para el ajuste de *requests* (que es complementario: right-sizing y no elasticidad).
+
+#### 7. Aprovisionamiento y escalado de nodos
+
+**En qué consiste la necesidad:** Gestionar el **ciclo de vida de las máquinas** de forma declarativa desde el propio clúster: crear nodos cuando faltan, eliminarlos cuando sobran, y orquestar sus upgrades.
+
+**Por qué conviene cubrirla en el clúster:** Terraform es excelente para el estado inicial, pero es *imperativo por apply*: no reacciona a un `Pending` por falta de capacidad. Cuando la demanda varía, la alternativa es que un humano mire métricas y ejecute un `apply`.
+
+**Qué implica no cubrirla:** Planificación de capacidad manual y permanente: o sobra hardware (coste) o los pods se quedan `Pending` en el peor momento. Los upgrades de nodos se convierten en una operación artesanal.
+
+**Dónde es crítica o casi indispensable:** Clústeres cloud con demanda elástica, plataformas que sirven muchos equipos y cualquier entorno donde añadir capacidad deba ser automático (o donde el coste de tenerla de más sea relevante).
+
+**Por qué no lo cubre el stack actual:** las VMs de Talos se crean con Terraform ([`terraform/modules/talos-node`](terraform/modules/talos-node)) y nadie reacciona a la falta de capacidad.
+
+**Herramienta principal:** **Cluster API** (proyecto del ecosistema Kubernetes/CNCF) — CRDs para declarar `Cluster`, `Machine` y `MachineDeployment`, con *providers* de infraestructura (Proxmox, AWS, vSphere, etc.) y de *bootstrap* (Talos tiene el suyo). [Sitio](https://cluster-api.sigs.k8s.io) · [GitHub](https://github.com/kubernetes-sigs/cluster-api).
+
+*Consumo orientativo:* ~100-300 mCPU y ~256-512 MiB por los gestores del *management cluster*. No hay chart en ArtifactHub (se instala con `clusterctl`).
+
+**Alternativas:** [Karpenter](https://karpenter.sh) (aprovisionamiento directo y rápido, orientado a cloud) y [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) (el clásico, atado a grupos de nodos del proveedor).
+
+#### 8. Almacenamiento replicado, con snapshots y RWX
+
+**En qué consiste la necesidad:** Que el dato sobreviva a la pérdida de un nodo y que pueda montarse en **lectura/escritura desde varios pods** (`ReadWriteMany`), además de snapshots y clones consistentes.
+
+**Por qué conviene cubrirla en el clúster:** El almacenamiento local es rápido y barato, pero **ata el dato al nodo**. En cuanto hay una base de datos o un servicio con varias réplicas que comparten ficheros, el almacenamiento local deja de servir.
+
+**Qué implica no cubrirla:** Si el nodo que tiene el volumen se cae, los pods de ese volumen no pueden arrancar en otro (o arrancan sin datos). No hay RWX, así que muchas aplicaciones con estado solo admiten una réplica. Y no hay snapshots: el "backup" es copiar ficheros a mano.
+
+**Dónde es crítica o casi indispensable:** Plataformas con cargas con estado de verdad (bases de datos, registros de artefactos, sistemas de ficheros compartidos), sectores regulados, y cualquier clúster con requisitos de continuidad.
+
+**Por qué no lo cubre el stack actual:** OpenEBS en modo `hostpath` es **almacenamiento local del nodo**: sin replicación, sin RWX y con snapshots limitados.
+
+**Herramienta principal:** **Rook-Ceph** (proyecto CNCF, *Graduated*) — operador de Ceph que ofrece block (`RWO`), filesystem (`RWX`) y object (`S3`) sobre discos dedicados, con auto-reparación, snapshots y replicación. [Sitio](https://rook.io) · [GitHub](https://github.com/rook/rook) · [ArtifactHub](https://artifacthub.io/packages/helm/rook-release/rook-ceph).
+
+*Consumo orientativo:* **el más caro de la lista**: mon/mgr ~1-1,5 GiB en total, y cada OSD ~2-4 GiB de RAM (`osd_memory_target`), además de discos dedicados. En un homelab de 2 máquinas es difícil de justificar.
+
+**Alternativas:** [Longhorn](https://longhorn.io) (CNCF, réplica a nivel de bloque sobre discos de los nodos, mucho más simple en homelab) y [Piraeus](https://piraeus.io) (operador de DRBD, RWX ligero).
+
+#### 9. Registro de imágenes privado
+
+**En qué consiste la necesidad:** Un registro propio para las imágenes de la organización, con control de acceso, retención, escaneo, firmas y replicación entre ubicaciones.
+
+**Por qué conviene cubrirla en el clúster:** Depender de un registro público implica límites de descarga, disponibilidad ajena y exposición de lo que se publica. Un registro interno permite además aplicar políticas de "solo imágenes de este registro" con sentido.
+
+**Qué implica no cubrirla:** *Rate limits* que rompen un despliegue, dependencia de un tercero en el camino crítico, y ninguna capacidad de auditar quién subió qué.
+
+**Dónde es crítica o casi indispensable:** Entornos *air-gapped* o con restricción de salida a Internet, sectores regulados, y organizaciones con muchos equipos publicando imágenes.
+
+**Por qué no lo cubre el stack actual:** se usan registros públicos (Docker Hub, GHCR, quay) directamente.
+
+**Herramienta principal:** **Harbor** (proyecto CNCF, *Graduated*) — registro OCI con RBAC por proyecto, escaneo con Trivy, firma (cosign/Notation), replicación y *proxy cache* de registros upstream. [Sitio](https://goharbor.io) · [GitHub](https://github.com/goharbor/harbor) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=harbor).
+
+*Consumo orientativo:* ~800 mCPU-2 GiB sumando core, jobservice, registry, PostgreSQL y Redis (en producción se externalizan la BD y el almacenamiento de objetos).
+
+**Alternativas:** [Zot](https://zotregistry.io) (CNCF, registro OCI ligero y *OCI-native*) y [Distribution](https://github.com/distribution/distribution) (el registro de referencia, mínimo pero sin RBAC ni escaneo).
+
+#### 10. Multi-tenancy por equipos
+
+**En qué consiste la necesidad:** Dar a cada equipo un espacio con sus namespaces, cuotas, políticas de red y permisos ("un clúster propio" desde su punto de vista) **sin** darle acceso de administrador al clúster real.
+
+**Por qué conviene cubrirla en el clúster:** RBAC es demasiado granular para gestionarlo equipo a equipo (roles, bindings, nombres únicos) y los namespaces por sí solos no aportan cuotas ni políticas. Sin una capa de tenancy, cada alta de equipo es una tarea manual del administrador.
+
+**Qué implica no cubrirla:** Un equipo puede consumir recursos de otro, colisionar en nombres de CRDs o namespaces, y el RBAC crece hasta ser inmanejable. La plataforma se convierte en un cuello de botella humano.
+
+**Dónde es crítica o casi indispensable:** Plataformas internas que sirven a varios equipos de desarrollo, organizaciones con separación por cliente (SaaS) y cualquier escenario donde el clúster sea compartido entre áreas con requisitos distintos.
+
+**Por qué no lo cubre el stack actual:** hay namespaces, RBAC y cuotas nativas, pero el alta y el aislamiento se hacen a mano y no hay plantilla de "tenant".
+
+**Herramienta principal:** **Capsule** (proyecto CNCF) — define `Tenant` como CRD y crea por uno los namespaces, cuotas, `NetworkPolicy`, `LimitRange` y RBAC del equipo, permitiendo que cada tenant gestione sus propios namespaces sin ver los de otros. [Sitio](https://capsule.clastix.io) · [GitHub](https://github.com/projectcapsule/capsule) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=capsule).
+
+*Consumo orientativo:* ~50-150 mCPU y ~128-256 MiB, con un único Deployment.
+
+**Alternativas:** [vCluster](https://www.vcluster.com) (clúster virtual con su propio API server, aislamiento mucho mayor a cambio de más recursos), [HNC](https://github.com/kubernetes-sigs/hierarchical-namespaces) (jerarquía de namespaces con herencia de políticas) y `ResourceQuota`+`LimitRange`+RBAC hechos a mano.
+
+#### 11. DNS automático para los servicios publicados
+
+**En qué consiste la necesidad:** que el registro DNS de cada `HTTPRoute`/`Service` que se publica exista **sin intervención humana**, y que desaparezca cuando el recurso desaparece. Con dominios propios, cada servicio nuevo necesita un registro (A, CNAME o TXT) que hoy se crea a mano en Cloudflare o en el DNS local.
+
+**Por qué conviene cubrirla en el clúster:** el DNS pasa a formar parte del despliegue declarativo. El alta de un servicio deja de depender de que alguien recuerde crear el registro, y el borrado no deja huérfanos apuntando a una IP que ya no existe.
+
+**Qué implica no cubrirla:** registros desactualizados (el clásico "funciona en el clúster pero no resuelve"), errores de dedo en nombres, y un paso manual en cada entrega que se olvida justo cuando hay prisa. Con muchos servicios, la tabla de DNS se vuelve inmantenible.
+
+**Dónde es crítica o casi indispensable:** organizaciones con decenas de servicios y varios dominios, equipos que dan de alta entornos efímeros (previews por PR) y cualquier plataforma con autoservicio.
+
+**Por qué no lo cubre el stack actual:** los registros de `eljavatar.home` y `.org` se crean a mano (DNS local y Cloudflare); el Gateway publica el hostname, pero nadie crea el registro.
+
+**Herramienta principal:** **ExternalDNS** (proyecto de `kubernetes-sigs`, parte del ecosistema Kubernetes; no es un proyecto CNCF) — observa `Ingress`, `Service` y `HTTPRoute` y sincroniza los registros con decenas de proveedores (Cloudflare, Route 53, Pi-hole, RFC2136, etc.), con *ownership* por TXT para no borrar lo que no gestiona. [Sitio](https://kubernetes-sigs.github.io/external-dns) · [GitHub](https://github.com/kubernetes-sigs/external-dns) · [ArtifactHub](https://artifacthub.io/packages/helm/external-dns/external-dns).
+
+*Consumo orientativo:* ~30-80 mCPU y ~64-128 MiB; escala con el número de recursos observados, no con el tráfico.
+
+**Alternativas:** [cert-manager](https://cert-manager.io) con DNS-01 ya escribe TXT en el proveedor (solo para desafíos), y los *controllers* propios de cada proveedor (por ejemplo el de Cloudflare) cubren casos muy concretos.
+
+#### 12. Identidad criptográfica de las cargas de trabajo (SPIFFE)
+
+**En qué consiste la necesidad:** que cada workload tenga una **identidad verificable y efímera** (un certificado con su `SPIFFE ID`, por ejemplo `spiffe://cluster/ns/pagos/sa/api`), emitida por el clúster y rotada automáticamente, en lugar de compartir tokens o contraseñas estáticas entre servicios.
+
+**Por qué conviene cubrirla en el clúster:** es la base del *zero trust* interno: permite que un servicio demuestre **quién es** a otro sin depender de la red, y que la autorización se exprese sobre identidades en lugar de IPs. También resuelve el problema de identidad **entre clústeres** (un SPIFFE ID es portable, una ServiceAccount no).
+
+**Qué implica no cubrirla:** los servicios se autentican con secretos estáticos que hay que distribuir, rotar y auditar; cualquier pod que robe ese secreto suplanta al servicio. Y no hay forma de autorizar por identidad de workload en mallas o gateways.
+
+**Dónde es crítica o casi indispensable:** arquitecturas de microservicios con requisitos de *zero trust*, entornos multi-clúster o multi-nube, y sectores donde se exige autenticación mutua y rotación de credenciales.
+
+**Por qué no lo cubre el stack actual:** cert-manager emite certificados **de servidor** y Vault emite credenciales para aplicaciones que saben pedirlas, pero no hay una identidad de workload emitida y rotada por el clúster.
+
+**Herramienta principal:** **SPIRE** (proyecto CNCF) — implementación de SPIFFE: *server* que actúa como CA y *agents* (DaemonSet) que atestan los pods mediante sus ServiceAccounts y les entregan certificados de corta duración por la Workload API. [Sitio](https://spiffe.io) · [GitHub](https://github.com/spiffe/spire) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=spire).
+
+*Consumo orientativo:* ~100-250 mCPU y ~128-256 MiB para el server, más ~50-100 mCPU y ~64-128 MiB **por nodo** del agente.
+
+**Alternativas:** [cert-manager](https://cert-manager.io) con el emisor de Vault PKI (más simple, pero la identidad se ata a un secreto que la app debe montar) y las mallas de servicios, que traen su propia identidad (Istio con su CA, Linkerd con su emisor) aunque no son portables entre implementaciones.
+
+#### 13. Malla de servicios: mTLS y control de tráfico L7
+
+**En qué consiste la necesidad:** cifrado mutuo **entre** servicios, autorización a nivel de petición (método, path, cabeceras) y control fino del tráfico: *retries*, *timeouts*, *circuit breaking*, reparto por porcentaje y *mirroring*.
+
+**Por qué conviene cubrirla en el clúster:** Cilium da red, políticas L3/L4 y borde L7, pero **no** autenticación mutua por identidad ni políticas por ruta entre pods arbitrarios. Cuando el requisito es "que el servicio A solo pueda llamar a `GET /health` del servicio B", la respuesta deja de ser red y pasa a ser malla.
+
+**Qué implica no cubrirla:** tráfico interno en claro entre pods (en un clúster plano, cualquiera puede leerlo si compromete un nodo), autorización solo por IP/puerto, y resiliencia delegada a la aplicación (cada equipo implementando sus *retries*).
+
+**Dónde es crítica o casi indispensable:** entornos con requisitos de *zero trust* (PCI-DSS exige cifrado interno segmentado), plataformas con muchos equipos donde la comunicación entre servicios debe auditarse, y arquitecturas de microservicios grandes.
+
+**Por qué no lo cubre el stack actual:** Cilium cubre L3/L4 y el borde; no hay mTLS por identidad de workload ni políticas L7 entre pods.
+
+**Herramienta principal:** **Istio** (proyecto CNCF, *Graduated*) — mTLS automático, autorización L7, *traffic management* avanzado y modo *ambient* (sin sidecar, con `ztunnel` por nodo) que reduce mucho el coste. [Sitio](https://istio.io) · [GitHub](https://github.com/istio/istio) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=istio).
+
+*Consumo orientativo:* `istiod` ~300-500 mCPU y ~512 MiB-1 GiB (x2 en HA); el coste dominante es el *data plane*: ~100 mCPU y ~128 MiB **por pod** con sidecar, o ~100 mCPU y ~128 MiB **por nodo** en modo ambient.
+
+**Alternativas:** [Linkerd](https://linkerd.io) (CNCF, *Graduated*; mucho más simple y ligero, ~20 mCPU y ~64 MiB por proxy, a cambio de menos funcionalidad L7) y el *service mesh* de Cilium (mTLS y L7 sobre el mismo datapath eBPF, sin sidecars, pero con menos madurez en autorización L7).
+
+#### 14. Promoción de artefactos entre entornos
+
+**En qué consiste la necesidad:** mover una **misma** versión ya validada por una cadena de entornos (dev → staging → prod) con verificaciones entre etapas, sin reconstruir el artefacto y sin que nadie cambie a mano un `values.yaml` a las 2 de la mañana.
+
+**Por qué conviene cubrirla en el clúster:** Argo CD responde a "¿está el entorno como dice Git?", no a "¿puede pasar esta versión a producción?". La promoción es un flujo con puertas (tests, análisis, aprobación) y necesita estado propio: qué versión está en cada etapa y por qué se promovió.
+
+**Qué implica no cubrirla:** la promoción se haría con PRs manuales de bump de versión, con el riesgo de promover *tags* distintos entre entornos (la pesadilla de la trazabilidad) y sin registro de por qué se autorizó cada paso.
+
+**Dónde es crítica o casi indispensable:** organizaciones con varios entornos y obligaciones de auditoría sobre los cambios, y plataformas que sirven a muchos equipos con releases frecuentes.
+
+**Por qué no lo cubre el stack actual:** hay un solo entorno. Argo CD aplica lo que hay en Git; no existe el concepto de etapa, promoción ni *gate*.
+
+**Herramienta principal:** **Kargo** (open source de Akuity, el equipo que creó Argo CD; **no** es un proyecto CNCF) — modela `Warehouse` (fuente de artefactos), `Stage` (entorno) y `Freight` (versión verificada), y ejecuta secuencias de promoción con pasos y verificaciones, escribiendo el resultado de vuelta en Git. [Sitio](https://kargo.akuity.io) · [GitHub](https://github.com/akuity/kargo) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=kargo).
+
+*Consumo orientativo:* ~250-500 mCPU y ~256-512 MiB (API + controlador); no necesita base de datos externa: usa CRDs y Secrets.
+
+**Alternativas:** [Flux](https://fluxcd.io) (CNCF, *Graduated*) con [Flagger](https://flagger.app) para *progressive delivery* por entornos, y la vía "manual estructurada": ramas por entorno + overlays de Kustomize + `ApplicationSet` con `targetRevision` por *stage*.
+
+#### 15. Gestión de varios clústeres
+
+**En qué consiste la necesidad:** desplegar y mantener las mismas cargas en **varios clústeres** (regiones, nubes, sedes, *edge*) desde un punto de control, con colocación por políticas, *failover* y estado agregado.
+
+**Por qué conviene cubrirla en el clúster:** con un solo clúster, Argo CD basta. A partir del segundo, cada clúster duplica el trabajo operativo (credenciales, versiones, deriva) y la pregunta "¿qué versión está corriendo en cada sitio?" deja de tener una respuesta única.
+
+**Qué implica no cubrirla:** N veces la operación, deriva entre clústeres (el "funciona en Madrid pero no en Bogotá") y *failover* manual. Los equipos acaban con scripts que recorren `kubectl config use-context`.
+
+**Dónde es crítica o casi indispensable:** multi-región por latencia o residencia de datos, sedes con conectividad intermitente (*edge*), y organizaciones que ya operan más de tres clústeres.
+
+**Por qué no lo cubre el stack actual:** hay un único clúster; el bootstrap ni siquiera contempla un registro de clústeres.
+
+**Herramienta principal:** **Karmada** (proyecto CNCF) — plano de control multi-clúster compatible con la API de Kubernetes: `PropagationPolicy` para decidir qué va a qué clúster, con `OverridePolicy` por sitio y estado agregado. [Sitio](https://karmada.io) · [GitHub](https://github.com/karmada-io/karmada) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=karmada).
+
+*Consumo orientativo:* ~1-2 GiB de RAM y ~500 mCPU-1 CPU para el plano de control (API server, controller-manager y scheduler).
+
+**Alternativas:** Argo CD con `ApplicationSet` y generador de clústeres (la vía más simple, sin plano de control adicional), [Cluster API](https://cluster-api.sigs.k8s.io) para el ciclo de vida y [Skupper](https://skupper.io) o [Liqo](https://liqo.io) cuando lo que se busca es conectar servicios entre clústeres en lugar de orquestarlos.
+
+#### 16. Ingeniería del caos
+
+**En qué consiste la necesidad:** **inyectar fallos de forma controlada y continua** (matar pods, añadir latencia, particionar la red, llenar un disco, corromper respuestas DNS) para comprobar que la plataforma y las aplicaciones se recuperan como dicen sus SLOs.
+
+**Por qué conviene cubrirla en el clúster:** las pruebas de resiliencia hechas a mano se ejecutan una vez y nunca más. El caos automatizado convierte la validación en parte del ciclo: los experimentos se declaran como CRDs y se ejecutan con criterios de éxito.
+
+**Qué implica no cubrirla:** los fallos se descubren en producción, y las políticas de red, los PDB, los *timeouts* y las *probes* nunca se validan de verdad. La recuperación depende de la suerte y del conocimiento tácito de una persona.
+
+**Dónde es crítica o casi indispensable:** organizaciones con SLOs formales y guardias, plataformas con cargas con estado, y equipos que quieren hacer *game days* sin construir su propio inyector de fallos.
+
+**Por qué no lo cubre el stack actual:** existe un script puntual ([`tests/gateway-chaos-test.sh`](tests/gateway-chaos-test.sh)) que valida la migración de la IP flotante, pero no hay experimentos continuos ni catálogo de fallos.
+
+**Herramienta principal:** **Chaos Mesh** (proyecto CNCF) — operador con CRDs para `PodChaos`, `NetworkChaos`, `StressChaos`, `IOChaos`, `DNSChaos` y `TimeChaos`, con *workflows* y planificación. [Sitio](https://chaos-mesh.org) · [GitHub](https://github.com/chaos-mesh/chaos-mesh) · [ArtifactHub](https://artifacthub.io/packages/helm/chaos-mesh/chaos-mesh).
+
+*Consumo orientativo:* ~100-200 mCPU y ~128-256 MiB para el controlador, más ~50 mCPU y ~64 MiB **por nodo** del `chaos-daemon` (necesita privilegios para manipular la red y el sistema de ficheros del nodo).
+
+**Alternativas:** [LitmusChaos](https://litmuschaos.io) (CNCF, con *ChaosHub* de experimentos reutilizables) y [ChaosBlade](https://github.com/chaosblade-io/chaosblade).
+
+#### 17. Visibilidad de coste y *right-sizing*
+
+**En qué consiste la necesidad:** saber **cuánto cuesta** cada namespace, equipo o etiqueta, y si los `requests`/`limits` están bien dimensionados respecto al consumo real.
+
+**Por qué conviene cubrirla en el clúster:** el HPA escala por CPU pero nadie garantiza que el `request` base sea correcto. Sin atribución de coste no hay conversación posible entre plataforma y producto sobre recursos, y el sobredimensionamiento se convierte en una constante invisible.
+
+**Qué implica no cubrirla:** costes inexplicables (o capacidad desperdiciada), imposibilidad de *chargeback* por equipo y decisiones de capacidad a ojo. En cloud se factura cada mes; en homelab se traduce en hardware comprado de más.
+
+**Dónde es crítica o casi indispensable:** cualquier organización con factura cloud relevante, equipos de plataforma que cobran internamente, y clústeres con muchos namespaces de distintos dueños.
+
+**Por qué no lo cubre el stack actual:** metrics-server da consumo puntual de pods y nodos, pero no histórico, ni atribución, ni recomendaciones; y en este Homelab no hay factura cloud que repartir.
+
+**Herramienta principal:** **OpenCost** (proyecto CNCF) — calcula el coste por pod/namespace/etiqueta a partir de precios de nodos y consumo, y expone las métricas para consultarlas o graficarlas. [Sitio](https://opencost.io) · [GitHub](https://github.com/opencost/opencost) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=opencost).
+
+*Consumo orientativo:* ~100-300 mCPU y ~256 MiB-1 GiB; **requiere Prometheus** (o compatible) con las métricas de nodos y pods, así que hereda el coste del stack de observabilidad.
+
+**Alternativas:** Kubecost (producto comercial sobre OpenCost), [Goldilocks](https://goldilocks.docs.fairwinds.com) junto a [VPA](https://github.com/kubernetes-sigs/vertical-pod-autoscaler) (solo recomendaciones de *requests*, sin coste) y la propia facturación del proveedor cloud con etiquetas de *cost allocation*.
+
+#### 18. Procesamiento batch, colas y cuotas de trabajo
+
+**En qué consiste la necesidad:** ejecutar trabajos que no son servicios permanentes (ETL, entrenamiento, renderizado, migraciones) **encolados**, con cuotas por equipo y reparto justo de la capacidad cuando hay más demanda que nodos.
+
+**Por qué conviene cubrirla en el clúster:** el scheduler de Kubernetes atiende pods, no "trabajos con prioridad y cuota". Sin una capa de colas, dos equipos lanzan 200 Jobs a la vez y el clúster entra en un ciclo de desalojo y *starvation* donde nadie termina.
+
+**Qué implica no cubrirla:** Jobs que esperan indefinidamente, Pods `Pending` que bloquean a los servicios, y ausencia de *fair sharing* entre equipos. Tampoco hay forma de decir "este trabajo usa GPUs solo cuando no hay inferencia".
+
+**Dónde es crítica o casi indispensable:** plataformas de datos y de ML, organizaciones con clústeres compartidos entre batch y online, y cualquier entorno con GPUs o hardware caro y escaso.
+
+**Por qué no lo cubre el stack actual:** existen `Job` y `CronJob` nativos (de hecho el Homelab usa uno para sincronizar el certificado de Vault), pero no hay colas, ni cuotas por cola, ni *preemption* entre equipos.
+
+**Herramienta principal:** **Kueue** (proyecto de `kubernetes-sigs`, parte del ecosistema Kubernetes) — CRDs de `ClusterQueue`, `LocalQueue` y `Workload` que gestionan *admission* y *preemption* de Jobs, integrable con Cluster Autoscaler/Karpenter. [Sitio](https://kueue.sigs.k8s.io) · [GitHub](https://github.com/kubernetes-sigs/kueue) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=kueue).
+
+*Consumo orientativo:* ~100-200 mCPU y ~256 MiB para el controlador; el coste real es la capacidad que consumen los Jobs.
+
+**Alternativas:** [Argo Workflows](https://argoproj.github.io/workflows) (CNCF, *Graduated*; DAGs de tareas y plantillas, muy usado para pipelines de datos) y [Volcano](https://volcano.sh) (CNCF, planificación de batch/HPC con *gang scheduling*).
+
+#### 19. Portal de autoservicio para los equipos
+
+**En qué consiste la necesidad:** un **catálogo** donde un equipo pide "un servicio nuevo con base de datos", obtiene el andamiaje (repositorio, pipeline, manifests, alertas) y ve el estado de lo suyo, sin abrir un ticket.
+
+**Por qué conviene cubrirla en el clúster:** el bootstrap técnico resuelve *dónde* se despliega, no *cómo se pide*. Sin portal, cada alta se resuelve por chat/ticket y el conocimiento vive en la cabeza de dos personas; el portal convierte esa plantilla en software versionado y medible.
+
+**Qué implica no cubrirla:** *onboarding* lento, configuraciones inconsistentes entre equipos y una carga alta de soporte en el equipo de plataforma. Los equipos copian el repositorio de otro y arrastran su deuda.
+
+**Dónde es crítica o casi indispensable:** organizaciones con muchas células o equipos (decenas), plataformas internas con SLA hacia producto, y empresas que necesitan demostrar *golden paths* y cumplimiento en el alta de servicios.
+
+**Por qué no lo cubre el stack actual:** no aplica a un homelab de una persona; hoy la "plantilla" son los ejemplos de este README y la convención de [`k8s/apps/`](k8s/apps) es más que suficiente.
+
+**Herramienta principal:** **Backstage** (proyecto CNCF) — portal de desarrollador con catálogo de software, *software templates* (scaffolding con formularios) y plugins para CI/CD, Kubernetes y documentación. [Sitio](https://backstage.io) · [GitHub](https://github.com/backstage/backstage).
+
+*Consumo orientativo:* ~300-800 mCPU y ~512 MiB-1 GiB (es una aplicación Node con frontend y backend) más una base de datos; se puede desplegar como app normal en el clúster.
+
+**Alternativas:** Port (SaaS comercial), [KubeVela](https://kubevela.io) (CNCF; modelo de aplicaciones OAM con *traits* por entorno) y un *golden path* mínimo con repositorio plantilla + `ApplicationSet`.
+
+#### 20. Conformidad del clúster
+
+**En qué consiste la necesidad:** verificar de forma reproducible que el clúster **cumple la especificación de Kubernetes** (tests de conformidad) y que las versiones instaladas siguen soportadas.
+
+**Por qué conviene cubrirla en el clúster:** es la garantía de portabilidad: si mañana se cambia de CNI, de cloud o se migra el clúster, los manifiestos y operadores seguirán funcionando. En distribuciones y plataformas internas es, directamente, parte del producto.
+
+**Qué implica no cubrirla:** se descubriría en la migración que el clúster dependía de un comportamiento no estándar. Tampoco hay evidencia objetiva para un cliente o un auditor de que el clúster es "Kubernetes conforme".
+
+**Dónde es crítica o casi indispensable:** quien construye una distribución o plataforma sobre Kubernetes (incluido un homelab que quiera demostrar buenas prácticas), organizaciones multi-nube y procesos de *upgrade* con validación previa.
+
+**Por qué no lo cubre el stack actual:** [`scripts/validate-cluster.sh`](scripts/validate-cluster.sh) valida **este** stack (que los componentes estén sanos), no la conformidad con la especificación de Kubernetes.
+
+**Herramienta principal:** **Sonobuoy** (proyecto CNCF) — ejecuta la batería de tests de conformidad de Kubernetes (y plugins propios) en Jobs temporales y genera un informe exportable. [Sitio](https://sonobuoy.io) · [GitHub](https://github.com/vmware-tanzu/sonobuoy).
+
+*Consumo orientativo:* **0 en reposo**: no hay componente residente; el coste son los Jobs que ejecutan las pruebas mientras dura la validación.
+
+**Alternativas:** los tests e2e de Kubernetes (`kubernetes/test/conformance`) orquestados a mano, [kube-bench](https://github.com/aquasecurity/kube-bench) para el CIS (complementario, no es conformidad) y la validación de la distribución (Talos publica sus propias notas de conformidad).
+
+#### Propósitos deliberadamente fuera de esta lista
+
+| Propósito | Por qué no está aquí |
+|-----------|----------------------|
+| Observabilidad (métricas, logs, trazas, alertas) | Está en la hoja de ruta de este Homelab: VictoriaMetrics + OpenObserve sobre el nodo de operaciones |
+| Autenticación de usuarios y SSO (OIDC/SAML) | Planificado con Keycloak como despliegue posterior |
+| Almacenamiento de objetos compatible con S3 | Planificado con SeaweedFS |
+| Mensajería y *streaming* (Kafka, Pulsar) | Mencionado como necesidad futura; no forma parte del estado "ready to work" mínimo |
+| Gestión de secretos en Git sin Vault externo | Ya cubierto por Vault + ESO/VSO; Sealed Secrets o SOPS serían alternativas si no existiera Vault |
+
+### Cómo decidir qué instalar (y qué no)
+
+Cada componente de esta lista añade **superficie de ataque, consumo y una cosa más que operar**. La regla que aplico en este Homelab es la misma que usaría en una empresa: instalar primero lo que evita un daño **irreversible** y solo después lo que mejora la eficiencia.
+
+| Prioridad | Propósito | Por qué en ese orden |
+|-----------|-----------|----------------------|
+| 1 | Copias de seguridad (2) | Es lo único que no se puede recuperar de otra forma |
+| 2 | Guardrails de admisión (1) | Evita que el daño entre por diseño |
+| 3 | Detección en runtime (3) y escaneo (4) | Convierten un incidente silencioso en una alerta |
+| 4 | Almacenamiento resiliente (8) y mTLS (13) | Cuando hay cargas con estado o requisitos de *zero trust* |
+| 5 | Autoscaling (6), DNS automático (11), multi-tenancy (10) | Eficiencia y escala de la operación |
+| 6 | El resto (5, 7, 9, 12, 14-20) | Dependen del modelo de negocio y del tamaño de la organización |
+
+Y la contraparte: si el clúster es de una sola persona, con un puñado de servicios y sin datos que no se puedan regenerar, **la lista correcta es casi vacía**. Este Homelab es exactamente ese caso.
 
 ---
 
@@ -6539,7 +6962,7 @@ k8s/apps/
 ```
 
 | Caso de la aplicación | Estructura | Cuándo |
-|---|---|---|
+|-----------------------|------------|--------|
 | Chart de terceros + values | `apps/<app>/values.yaml` | El caso habitual |
 | Varios entornos | `apps/<app>/values/{local,prod}.yaml` | Cuando aparezca el segundo entorno |
 | Chart propio | `apps/<app>/charts/<app>/` + `apps/<app>/values.yaml` | Poco frecuente |
@@ -6576,7 +6999,7 @@ Por eso `make gitops-publish` publica `gitops/` **y todo `k8s/`**: si un values 
 ### Dónde va cada cosa nueva
 
 | Lo que se va a crear | Dónde va |
-|---|---|
+|----------------------|----------|
 | Un values de Helm para un componente del bootstrap | `k8s/bootstrap/deployments/<componente>-values.yaml` |
 | Un `Namespace`, `Certificate`, `ClusterIssuer` o RBAC del bootstrap | `k8s/bootstrap/config/` |
 | Un `.tpl` que renderiza Terraform | `k8s/bootstrap/templates/` |
