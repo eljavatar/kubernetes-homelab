@@ -1,4 +1,4 @@
-### INI: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento)
+### INI: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento, ArgoCD y Componentes utilitarios)
 
 # Configuramos el Provider de Helm usando los datos en memoria
 # Como usamos talos_cluster_kubeconfig.this, este provider se configurará después
@@ -235,14 +235,14 @@ resource "terraform_data" "wait_for_cilium_hubble" {
 # Configuración del Pool de IPs (Cilium)
 resource "kubectl_manifest" "cilium_ip_pool" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cilium-ip-pool.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cilium-ip-pool.yaml")
   depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
 # Configuración del L2 Advertisement (Cilium)
 resource "kubectl_manifest" "cilium_l2_policy" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cilium-l2-policy.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cilium-l2-policy.yaml")
   depends_on = [terraform_data.wait_for_cilium_hubble]
 }
 
@@ -299,13 +299,13 @@ resource "helm_release" "trust_manager" {
 # lo contrario, el for_each de kubectl_manifest.internal_ca no podrá planificarse
 data "kubectl_file_documents" "docs_internal_ca" {
   #count      = var.auto_config_cluster ? 1 : 0
-  content    = file("${local.k8s_path}/internal-ca.yaml")
+  content    = file("${local.k8s_path}/config/internal-ca.yaml")
   #depends_on = [helm_release.cert_manager]
 }
 
 # # Alternativa a kubectl_file_documents: Usar la función manifest_decode_multi
 # output "example_output" {
-#   value = provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/internal-ca.yaml"))
+#   value = provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/config/internal-ca.yaml"))
 # }
 
 resource "kubectl_manifest" "internal_ca" {
@@ -345,7 +345,7 @@ resource "kubectl_manifest" "internal_ca" {
 # No usamos kubernetes_manifest para esto, porque no admite multidocumento
 # resource "kubernetes_manifest" "internal_ca" {
 #   manifest = yamldecode(
-#     templatefile("${local.k8s_path}/internal-ca.yaml", {
+#     templatefile("${local.k8s_path}/config/internal-ca.yaml", {
 #       domain_name = var.domain_name
 #     })
 #   )
@@ -357,7 +357,7 @@ resource "kubectl_manifest" "internal_ca" {
 # Creamos el Trust Bundle
 resource "kubectl_manifest" "trust_bundle" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/trust-bundle.yaml")
+  yaml_body  = file("${local.k8s_path}/config/trust-bundle.yaml")
   depends_on = [helm_release.trust_manager]
 }
 
@@ -373,9 +373,21 @@ resource "kubernetes_secret_v1" "cloudflare_api_token_secret" {
 
   type = "Opaque"
 
-  data = {
+  # data = {
+  #   "api-token" = var.cloudflare_api_token
+  # }
+
+  # Usamos la alternativa con '_wo' (write only) para evitar que el valor del secreto quede guardado
+  # en el archivo terraform.tfstate; sin embargo, lo usamos en combinación con 'data_wo_revision' ya
+  # que como Terraform no guardaría el valor en el .tfstate, en el próximo terraform plan no sabrá si
+  # el contenido real del Secret en Kubernetes coincide o no con lo que se tiene en el código (ya que
+  # no tiene un valor guardado contra el cual comparar).
+  data_wo = {
     "api-token" = var.cloudflare_api_token
   }
+  # Forzar a Terraform a ver un cambio si el token cambia usando un hash, 
+  # o manejarlo con un número entero estático que incrementes manualmente.
+  data_wo_revision = 1 # <-- Se debe incrementar este número manualmente cuando cambie el token
 
   depends_on = [helm_release.trust_manager]
 }
@@ -388,7 +400,7 @@ resource "kubectl_manifest" "letsencrypt_stage_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/config/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -403,7 +415,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
   count = var.auto_config_cluster && var.use_prod_domain ? 1 : 0
 
   yaml_body = templatefile(
-    "${local.k8s_path}/letsencrypt-stage-cluster-issuer.yaml",
+    "${local.k8s_path}/config/letsencrypt-stage-cluster-issuer.yaml",
     {
       PERSONAL_EMAIL           = var.personal_email
       CLOUDFLARE_ACCOUNT_EMAIL = var.cloudflare_account_email
@@ -418,7 +430,7 @@ resource "kubectl_manifest" "letsencrypt_prod_cluster_issuer" {
 # Creamos el Namespace gateway-api-system
 resource "kubectl_manifest" "namespace_gateway_api_system" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/gateway-api-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/gateway-api-namespace.yaml")
   depends_on = [kubectl_manifest.letsencrypt_stage_cluster_issuer, kubectl_manifest.letsencrypt_prod_cluster_issuer]
 }
 
@@ -429,7 +441,7 @@ resource "kubectl_manifest" "namespace_gateway_api_system" {
 # Local
 resource "kubectl_manifest" "cert_gateway_local" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/cert-gateway-local.yaml")
+  yaml_body  = file("${local.k8s_path}/config/cert-gateway-local.yaml")
   depends_on = [kubectl_manifest.namespace_gateway_api_system]
 }
 
@@ -439,7 +451,7 @@ resource "kubectl_manifest" "cert_letsencrypt_public" {
 
   # Lee el archivo y reemplaza la cadena según el valor de var.use_letsencrypt_prod
   yaml_body = replace(
-    file("${local.k8s_path}/cert-letsencrypt-public.yaml"),
+    file("${local.k8s_path}/config/cert-letsencrypt-public.yaml"),
     "name: letsencrypt-stage-issuer",
     "name: ${var.use_letsencrypt_prod ? "letsencrypt-prod-issuer" : "letsencrypt-stage-issuer"}"
   )
@@ -468,7 +480,7 @@ resource "kubectl_manifest" "external_gateway" {
 # Creamos el redireccionador http global para que redireccione a https
 resource "kubectl_manifest" "global_http_redirect" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/global-http-redirect.yaml")
+  yaml_body  = file("${local.k8s_path}/config/global-http-redirect.yaml")
   depends_on = [kubectl_manifest.external_gateway]
 }
 
@@ -492,9 +504,13 @@ resource "kubernetes_secret_v1" "cloudflare_tunnel_token_secret" {
 
   type = "Opaque"
 
-  data = {
+  # data = {
+  #   "TUNNEL_TOKEN" = var.cloudflare_tunnel_token
+  # }
+  data_wo = {
     "TUNNEL_TOKEN" = var.cloudflare_tunnel_token
   }
+  data_wo_revision = 1
 
   depends_on = [kubectl_manifest.namespace_cloudflare_tunnel_system]
 }
@@ -509,7 +525,21 @@ resource "kubectl_manifest" "cloudflared_agent" {
 
 
 # Configuración del almacenamiento con OpenEBS
-# Instalamos OpenEBS
+#
+# 1. Namespace con el nivel de Pod Security que OpenEBS necesita.
+#    El provisioner de hostpath monta el directorio de datos del nodo (hostPath) y corre
+#    privilegiado, así que 'baseline' y 'restricted' lo rechazan en la admisión. La etiqueta
+#    del namespace tiene prioridad sobre 'defaults.enforce' de la PodSecurityConfiguration,
+#    por lo que funciona igual con enforce privileged, baseline o restricted.
+#    Se aplica ANTES del chart: si el Deployment nace sin la etiqueta, se queda reintentando
+#    con FailedCreate y 'helm install --wait' termina en timeout.
+resource "kubectl_manifest" "namespace_openebs" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.k8s_path}/config/openebs-namespace.yaml")
+  depends_on = [kubectl_manifest.cloudflared_agent]
+}
+
+# 2. Instalamos OpenEBS (create_namespace = false: el namespace lo crea el recurso anterior)
 resource "helm_release" "openebs" {
   count            = var.auto_config_cluster ? 1 : 0
 
@@ -518,14 +548,14 @@ resource "helm_release" "openebs" {
   chart            = "openebs"
   version          = "4.5.1"
   namespace        = "openebs"
-  create_namespace = true
+  create_namespace = false
 
   # Carga el archivo de valores externo
   values = [
     file("${local.k8s_path}/deployments/openebs-values.yaml")
   ]
 
-  depends_on = [kubectl_manifest.cloudflared_agent]
+  depends_on = [kubectl_manifest.namespace_openebs]
 }
 
 
@@ -535,7 +565,7 @@ resource "helm_release" "openebs" {
 # 1. Creamos el namespace external_auth
 resource "kubectl_manifest" "namespace_external_auth" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/external-auth-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/external-auth-namespace.yaml")
   depends_on = [helm_release.openebs]
 }
 
@@ -544,7 +574,7 @@ resource "kubectl_manifest" "namespace_external_auth" {
 # Por esa razón, no puede usarse en el mismo plan donde se hace el bootstrap del clúster (con Talos), ya
 # que en esta instancia aún no hay un clúster de kubernetes existente.
 # resource "kubernetes_manifest" "vault_token_reviewer" {
-#   for_each = { for manifest in provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/vault-token-reviewer-setup.yaml")) : "${lower(manifest.kind)}-${manifest.metadata.name}" => manifest }
+#   for_each = { for manifest in provider::kubernetes::manifest_decode_multi(file("${local.k8s_path}/config/vault-token-reviewer-setup.yaml")) : "${lower(manifest.kind)}-${manifest.metadata.name}" => manifest }
 #   manifest = each.value
 #   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
@@ -555,14 +585,14 @@ resource "kubectl_manifest" "namespace_external_auth" {
 #   default = []
 # }
 # resource "kubectl_manifest" "vault_token_reviewer" {
-#   for_each   = var.auto_config_cluster ? toset(split("---", file("${local.k8s_path}/vault-token-reviewer-setup.yaml"))) : var.empty_string_set
+#   for_each   = var.auto_config_cluster ? toset(split("---", file("${local.k8s_path}/config/vault-token-reviewer-setup.yaml"))) : var.empty_string_set
 #   yaml_body  = each.value
 #   depends_on = [kubectl_manifest.namespace_external_auth]
 # }
 
 # 2. Aplicamos el manifiesto de configuración del TokenReviewer
 data "kubectl_file_documents" "files_vault_token_reviewer_setup" {
-  content    = file("${local.k8s_path}/tf-vault-token-reviewer-setup-without-secret.yaml")
+  content    = file("${local.k8s_path}/config/tf-vault-token-reviewer-setup-without-secret.yaml")
 }
 
 resource "kubectl_manifest" "vault_token_reviewer_setup" {
@@ -597,6 +627,38 @@ resource "kubernetes_secret_v1" "vault_token_reviewer_secret" {
   depends_on = [kubectl_manifest.vault_token_reviewer_setup]
 }
 
+# No podemos usar este kubectl_manifest ya que al usar 'ignore_fields = ["data"]' no se podrían referenciar las
+# propiedades .data["ca.crt"] ni .data["token"] en el recurso de Vault de más adelante
+# # Cuando se usa type = "kubernetes.io/service-account-token" junto con la anotación, no se le están enviando datos a
+# # Kubernetes. Es el propio Control Plane de Kubernetes el que genera dinámicamente el ca.crt y el token una vez que
+# # detecta el recurso. Durante el terraform apply, el provider lee el estado final del objeto desde la API de Kubernetes
+# # para confirmar que se creó correctamente y guarda obligatoriamente toda la respuesta (incluyendo el campo data
+# # autogenerado) en el archivo .tfstate.
+# # La gran ventaja del recurso kubectl_manifest es que por defecto enmascara y trata de forma segura el bloque data
+# # de cualquier recurso Secret, ignorándolo de los reportes del plan y evitando inyectar los campos que Kubernetes
+# # auto-genera (como el token) dentro de los atributos visibles tradicionales del .tfstate.
+# resource "kubectl_manifest" "vault_token_reviewer_secret" {
+#   count = var.auto_config_cluster ? 1 : 0
+
+#   yaml_body = <<YAML
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: vault-token-reviewer-secret
+#   namespace: external-auth
+#   annotations:
+#     kubernetes.io/service-account.name: vault-token-reviewer-sa
+# type: kubernetes.io/service-account-token
+# YAML
+
+#   # Opcional pero altamente recomendado para Secrets generados:
+#   # Esto le dice a Terraform que no se alarme ni intente pisar o rastrear el campo 'data' 
+#   # cuando Kubernetes inyecte el token, ca.crt y namespace de forma asíncrona.
+#   ignore_fields = ["data"]
+
+#   # Espera a que el ServiceAccount sea creado por el loop de kubectl_manifest
+#   depends_on = [kubectl_manifest.vault_token_reviewer_setup]
+# }
 
 
 
@@ -644,25 +706,25 @@ resource "vault_kubernetes_auth_backend_config" "eljavatar_k8s_config" {
 # 1. Creamos los namespaces
 resource "kubectl_manifest" "namespace_ops_shared" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/shared-ops-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/shared-ops-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 resource "kubectl_manifest" "namespace_eso" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/eso-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/eso-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 resource "kubectl_manifest" "namespace_vso" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-namespace.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-namespace.yaml")
   depends_on = [vault_kubernetes_auth_backend_config.eljavatar_k8s_config]
 }
 
 # 2. Creamos los permisos mediante RBAC
 data "kubectl_file_documents" "files_vault_cert_syncer_rbac" {
-  content    = file("${local.k8s_path}/vault-cert-syncer-rbac.yaml")
+  content    = file("${local.k8s_path}/config/vault-cert-syncer-rbac.yaml")
 }
 
 resource "kubectl_manifest" "vault_cert_syncer_rbac" {
@@ -696,9 +758,12 @@ resource "terraform_data" "first_sync_vault_cert_manual" {
   }
 
   provisioner "local-exec" {
-    # Añadimos validación '--ignore-not-found' para evitar que falle si el Job ya existe
     #command = "kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
-    command = "kubectl delete job first-sync-vault-cert-manual -n shared-ops --ignore-not-found && kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    # Intentamos eliminar primero en caso de que el Job exista (lo cual no debería pasar) y añadimos
+    # la validación '--ignore-not-found' para evitar que el delete falle si el Job no existe
+    #command = "kubectl delete job first-sync-vault-cert-manual -n shared-ops --ignore-not-found && kubectl create job first-sync-vault-cert-manual --from=cronjob/sync-vault-cert -n shared-ops"
+    # Renombramos el job a sync-vault-cert-first-manual para que coincida con la validación del script validate-cluster.sh
+    command = "kubectl delete job sync-vault-cert-first-manual -n shared-ops --ignore-not-found && kubectl create job sync-vault-cert-first-manual --from=cronjob/sync-vault-cert -n shared-ops"
     interpreter = ["/bin/bash", "-c"]
 
     environment = {
@@ -755,22 +820,243 @@ resource "helm_release" "vso" {
 # Configuración del VaultConnection (de VSO)
 resource "kubectl_manifest" "vso_vault_connection" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-vault-connection.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-vault-connection.yaml")
   depends_on = [helm_release.vso]
 }
 
 # Configuración del VaultAuthGlobal (de VSO)
 resource "kubectl_manifest" "vso_vault_auth_global" {
   count      = var.auto_config_cluster ? 1 : 0
-  yaml_body  = file("${local.k8s_path}/vso-vault-auth-global.yaml")
+  yaml_body  = file("${local.k8s_path}/config/vso-vault-auth-global.yaml")
   depends_on = [kubectl_manifest.vso_vault_connection]
 }
 
 
 
+
+# Instalación de Argo CD (GitOps)
+# 1. Leemos desde Vault el hash bcrypt del usuario 'admin' (nunca se versiona en Git).
+#    NOTA: en el proveedor de Vault 5.x este data source está marcado como deprecado a favor
+#    del recurso 'ephemeral "vault_kv_secret_v2"'. Se mantiene el data source porque el valor
+#    resultante se consume en 'set_sensitive' (argumento no efímero) y solo contiene el hash
+#    bcrypt (nunca la contraseña en texto plano) en el state local, que está en .gitignore.
+#    Antes de aplicar, el secreto debe existir en el motor KV v2 del clúster:
+#      export ARGOCD_ADMIN_PASSWORD='...'
+#      export ARGOCD_ADMIN_PASSWORD_HASH="$(htpasswd -nbBC 10 '' "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/$2y/$2a/')"
+#      vault kv put secret/eljavatar_k8s/kv-v2/argocd/admin \
+#        admin_password_hash="$ARGOCD_ADMIN_PASSWORD_HASH" \
+#        admin_password_mtime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+data "vault_kv_secret_v2" "argocd_admin" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  mount = "secret/eljavatar_k8s/kv-v2"
+  name  = "argocd/admin"
+
+  depends_on = [kubectl_manifest.vso_vault_auth_global]
+}
+
+# 2. Instalamos el chart (Chart 10.10.5 -> App v3.5.5)
+resource "helm_release" "argo_cd" {
+  count            = var.auto_config_cluster ? 1 : 0
+
+  name             = "argo-cd"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  version          = "10.10.5"
+  namespace        = "argocd"
+  create_namespace = true
+
+  wait          = true
+  wait_for_jobs = true
+  timeout       = 600
+
+  # Carga el archivo de valores externo
+  values = [
+    file("${local.k8s_path}/deployments/argo-cd-values.yaml")
+  ]
+
+  # Credenciales fuera de Git: hash bcrypt + marca de tiempo del cambio de contraseña.
+  # El proveedor helm 3.x maneja 'set_sensitive' y 'set' como argumentos (lista de objetos),
+  # ya no como bloques anidados como en la versión 2.x.
+  set_sensitive = [
+    {
+      name  = "configs.secret.argocdServerAdminPassword"
+      value = data.vault_kv_secret_v2.argocd_admin[0].data["admin_password_hash"]
+      type  = "string"
+    }
+  ]
+
+  set = [
+    {
+      name  = "configs.secret.argocdServerAdminPasswordMtime"
+      value = try(data.vault_kv_secret_v2.argocd_admin[0].data["admin_password_mtime"], "")
+      type  = "string"
+    }
+  ]
+
+  depends_on = [data.vault_kv_secret_v2.argocd_admin]
+}
+
+
+
+# Bootstrap de GitOps
+# A partir de aquí, Argo CD se auto-gestiona: Terraform solo crea el AppProject y la
+# Application raíz (una sola vez). Los demás componentes se instalan al sincronizar
+# la Application raíz, que lee 'gitops/apps/*/application.yaml' del repositorio.
+# 1. AppProject (gobernanza: repos permitidos y destinos). Debe existir antes que
+#    las Applications que lo referencian.
+resource "kubectl_manifest" "argocd_project_homelab_platform" {
+  count      = var.auto_config_cluster ? 1 : 0
+  yaml_body  = file("${local.gitops_path}/projects/homelab-platform.yaml")
+  # Los CRDs de Argo CD (AppProject/Application) los instala el chart, por lo que
+  # este recurso solo puede aplicarse cuando el release ya está desplegado
+  depends_on = [helm_release.argo_cd]
+}
+
+# 2. Application raíz (App-of-Apps). Sincroniza 'gitops/apps' de forma recursiva y
+#    solo aplica los archivos llamados 'application.yaml'.
+#    La rama que sincroniza se parametriza con 'var.gitops_branch': 'main' en producción
+#    y 'test/<tema>' durante las pruebas (publicadas con 'make gitops-publish').
+#    La raíz se crea con 'syncPolicy.automated' (ver gitops/bootstrap/root.yaml), por lo
+#    que NO hace falta ejecutar 'argocd app sync root' después del apply.
+resource "kubectl_manifest" "argocd_root_application" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  yaml_body = replace(
+    file("${local.gitops_path}/bootstrap/root.yaml"),
+    "targetRevision: main",
+    "targetRevision: ${var.gitops_branch}"
+  )
+
+  depends_on = [kubectl_manifest.argocd_project_homelab_platform]
+}
+
+# 3. ApplicationSet (App-of-Apps programático) para los componentes declarados en
+#    'gitops/generated/<componente>/config.yaml' (generador 'git files').
+#    El generador lee el repositorio por su cuenta (no lo sincroniza root), por lo que
+#    HAY QUE parametrizar la rama en DOS lugares:
+#      - 'revision' del generador  -> dónde busca los config.yaml
+#      - 'targetRevision' de la source 'ref: values' -> de dónde lee los values.yaml
+#    Sin esto, en pruebas apuntaría a 'main' (donde en principio puede que no existan los
+#    config.yaml) y el ApplicationSet generaría 0 Applications sin marcar ningún error.
+resource "kubectl_manifest" "argocd_appset_platform_components" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  yaml_body = replace(
+    replace(
+      file("${local.gitops_path}/appsets/platform-components.yaml"),
+      "revision: main",
+      "revision: ${var.gitops_branch}"
+    ),
+    "targetRevision: main",
+    "targetRevision: ${var.gitops_branch}"
+  )
+
+  depends_on = [kubectl_manifest.argocd_project_homelab_platform]
+}
+
+# 4. Espera activa: el apply no termina hasta que Argo CD deja las Applications sanas.
+#    Usamos kubectl (sin credenciales de Argo CD) consultando las condiciones del CRD
+#    Application, de modo que 'make tf-apply' solo retorna cuando el componente está
+#    realmente desplegado.
+resource "terraform_data" "argocd_wait_gitops" {
+  # Solo aplica cuando el componente NO lo gestiona Terraform (lo instala Argo CD)
+  count = var.auto_config_cluster && !var.sync_with_tf ? 1 : 0
+
+  # # Este bloque se ejecutará CADA VEZ que se ejecute terraform apply
+  # triggers_replace = {
+  #   always_run = timestamp()
+  # }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+
+      wait_for_app() {
+        app="$1"; max_attempts="$2"; i=0
+        until kubectl get application "$app" -n argocd >/dev/null 2>&1; do
+          i=$((i + 1))
+          if [ "$i" -ge "$max_attempts" ]; then
+            echo "Timeout esperando que exista la Application '$app'." >&2
+            echo "Posibles causas:" >&2
+            echo "  1. El manifiesto no está publicado en la rama '${var.gitops_branch}' (revisa 'make gitops-publish')." >&2
+            echo "  2. Root sincronizó con 0 recursos: revisa 'directory.include' (debe ser '*/application.yaml')" >&2
+            echo "     y que el archivo esté versionado: git ls-tree -r --name-only origin/${var.gitops_branch} -- gitops/apps" >&2
+            echo "  3. Root quedó OutOfSync/Unknown: kubectl describe application root -n argocd" >&2
+            exit 1
+          fi
+          sleep 5
+        done
+      }
+
+      # Espera a que una Application esté Synced Y Healthy, e imprime sus condiciones si no.
+      # Un error de generación de manifiestos (por ejemplo un valueFiles que no existe en la
+      # rama) deja sync=Unknown y health=Healthy, así que esperar solo por health lo daría por
+      # bueno: hay que exigir los dos estados.
+      wait_app_ok() {
+        app="$1"; timeout_s="$2"; i=0
+        while [ "$i" -lt "$timeout_s" ]; do
+          sync=$(kubectl get application "$app" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+          health=$(kubectl get application "$app" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+          if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+            echo "  $app: Synced/Healthy"
+            return 0
+          fi
+          sleep 5
+          i=$((i + 5))
+        done
+        echo "ERROR: '$app' no quedó Synced/Healthy en $timeout_s s (sync=$sync health=$health)." >&2
+        echo "Condiciones de la Application:" >&2
+        kubectl get application "$app" -n argocd \
+          -o jsonpath='{range .status.conditions[*]}  - {.type}: {.message}{"\n"}{end}' >&2
+        return 1
+      }
+
+      # La raíz debe quedar sincronizada (es la que crea las Applications hijas)
+      wait_for_app root 60
+      kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
+        application/root -n argocd --timeout=300s
+
+      # Los Componentes gestionados por Argo CD deben quedar Synced y Healthy
+      
+      # Componentes generados por el ApplicationSet (gitops/generated/<componente>/config.yaml).
+      # Si el generador apunta a otra rama, estas Applications no existen y aquí se ve el fallo.
+
+      wait_for_app argo-rollouts 60
+      wait_app_ok argo-rollouts 600
+      
+      wait_for_app reloader 60
+      wait_app_ok reloader 600
+
+      wait_for_app descheduler 60
+      wait_app_ok descheduler 600
+      
+      wait_for_app metrics-server 60
+      wait_app_ok metrics-server 600
+      
+      wait_for_app open-feature-operator 60
+      wait_app_ok open-feature-operator 600
+    EOT
+
+    environment = {
+      KUBECONFIG = local.KUBECONFIG
+    }
+  }
+
+  # El ApplicationSet debe existir (y haber generado sus Applications) antes de esperar
+  depends_on = [
+    kubectl_manifest.argocd_root_application,
+    kubectl_manifest.argocd_appset_platform_components,
+  ]
+}
+
+
+
+
 # Instalación de Argo Rollouts
 resource "helm_release" "argo_rollouts" {
-  count            = var.auto_config_cluster ? 1 : 0
+  count            = var.auto_config_cluster && var.sync_with_tf ? 1 : 0
 
   name             = "argo-rollouts"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -784,14 +1070,18 @@ resource "helm_release" "argo_rollouts" {
     file("${local.k8s_path}/deployments/argo-rollouts-values.yaml")
   ]
 
-  depends_on = [kubectl_manifest.vso_vault_auth_global]
+  depends_on = [
+    helm_release.cert_manager,
+    kubectl_manifest.argocd_root_application,
+    kubectl_manifest.argocd_appset_platform_components
+  ]
 }
 
 
 
 # Instalación de Reloader
 resource "helm_release" "reloader" {
-  count            = var.auto_config_cluster ? 1 : 0
+  count            = var.auto_config_cluster && var.sync_with_tf ? 1 : 0
 
   name             = "reloader"
   repository       = "https://stakater.github.io/stakater-charts"
@@ -812,7 +1102,7 @@ resource "helm_release" "reloader" {
 
 # Instalación de Descheduler
 resource "helm_release" "descheduler" {
-  count            = var.auto_config_cluster ? 1 : 0
+  count            = var.auto_config_cluster && var.sync_with_tf ? 1 : 0
 
   name             = "descheduler"
   repository       = "https://kubernetes-sigs.github.io/descheduler/"
@@ -833,7 +1123,7 @@ resource "helm_release" "descheduler" {
 
 # Instalación de Metrics Server
 resource "helm_release" "metrics_server" {
-  count            = var.auto_config_cluster ? 1 : 0
+  count            = var.auto_config_cluster && var.sync_with_tf ? 1 : 0
 
   name             = "metrics-server"
   repository       = "https://kubernetes-sigs.github.io/metrics-server/"
@@ -855,7 +1145,7 @@ resource "helm_release" "metrics_server" {
 # Instalación del OpenFeature Operator
 # Requiere cert-manager (ya instalado) para los certificados del webhook de admisión
 resource "helm_release" "open_feature_operator" {
-  count            = var.auto_config_cluster ? 1 : 0
+  count            = var.auto_config_cluster && var.sync_with_tf ? 1 : 0
 
   name             = "open-feature-operator"
   repository       = "https://open-feature.github.io/open-feature-operator"
@@ -876,4 +1166,4 @@ resource "helm_release" "open_feature_operator" {
   depends_on = [helm_release.cert_manager, helm_release.metrics_server]
 }
 
-### END: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento)
+### END: Código para Configurar el clúster automáticamente (CNI, Certificados, Cloudflare, Almacenamiento, ArgoCD y Componentes utilitarios)

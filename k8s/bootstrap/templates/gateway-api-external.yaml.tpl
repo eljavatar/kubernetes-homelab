@@ -27,13 +27,37 @@ spec:
         mode: Terminate
         certificateRefs:
           - kind: Secret
-            name: cert-gateway-local-secret 
+            name: cert-gateway-local-secret
+    - name: https-local-neobank
+      port: 443
+      protocol: HTTPS
+      hostname: "*.neobank.eljavatar.home"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: cert-gateway-local-secret
     # --- LISTENER 2: TRÁFICO PÚBLICO (Solo si está activo) ---
     %{ if USE_PROD_DOMAIN }
     - name: https-publico
       protocol: HTTPS
       port: 443
       hostname: "*.eljavatar.org"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: cert-letsencrypt-public-secret
+    - name: https-publico-neobank
+      protocol: HTTPS
+      port: 443
+      hostname: "*.neobank.eljavatar.org"
       allowedRoutes:
         namespaces:
           from: All

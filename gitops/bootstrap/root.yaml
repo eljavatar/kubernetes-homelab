@@ -1,0 +1,48 @@
+# Application raíz (patrón App-of-Apps).
+#
+# Se aplica UNA sola vez; a partir de ahí Argo CD se encarga del resto:
+#   1. kubectl apply -f gitops/projects/homelab-platform.yaml
+#   2. kubectl apply -f gitops/bootstrap/root.yaml
+#   3. argocd app sync root      # primera sincronización, deliberadamente manual
+#
+# Esta Application sincroniza 'gitops/apps' de forma recursiva y solo aplica los
+# archivos llamados 'application.yaml' (cada uno define una Application hija).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: homelab-platform
+  source:
+    repoURL: https://github.com/eljavatar/kubernetes-homelab
+    # Terraform REEMPLAZA este valor por 'var.gitops_branch' al aplicar el manifiesto
+    # (main en producción, test/<tema> durante las pruebas). Se deja 'main' como valor
+    # por defecto para aplicaciones manuales con kubectl.
+    targetRevision: main # test/gitops-bootstrap
+    path: gitops/apps
+    directory:
+      # Entra en las subcarpetas (gitops/apps/<componente>/)
+      recurse: true
+      # Argo CD compara 'include' contra el path RELATIVO de cada archivo, así que
+      # 'application.yaml' (sin comodín) solo matchearía un archivo en la raíz de
+      # gitops/apps y root sincronizaría con 0 recursos.
+      # '*/application.yaml' matchea gitops/apps/<componente>/application.yaml y
+      # sigue excluyendo variantes como 'application2.yaml' (doble dueño con Terraform)
+      # y archivos auxiliares como .gitkeep, values.yaml o config.yaml.
+      include: '*/application.yaml'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  # Sincronización automática: al crearse la Application, el controller la evalúa y
+  # crea/actualiza las Applications hijas sin necesidad de 'argocd app sync root'.
+  #
+  # 'prune: false' durante la fase de pruebas: borrar un application.yaml de la rama
+  # NO elimina la Application hija ni sus recursos. Cuando el árbol de apps sea estable,
+  # cambiarlo a 'true' para que Git sea la única fuente de verdad (garbage collection).
+  syncPolicy:
+    automated:
+      prune: false      # Borra recursos en K8s si se borran en Git
+      selfHeal: true    # Corrige (reconcilia con Git) cambios manuales hechos en el clúster
+    syncOptions:
+      - CreateNamespace=true

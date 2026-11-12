@@ -32,6 +32,66 @@ Por tanto, me decidí por la opción 2, para lo cual tuve que adquirir un router
 
 
 
+## Estructura de carpetas del proyecto
+
+El repositorio está organizado por **capas de responsabilidad**, no por tipo de fichero: cada carpeta responde a "quién lo ejecuta" y "en qué orden". Así el árbol de ficheros funciona también como mapa mental del bootstrap.
+
+```text
+kubernetes-homelab/
+├── terraform/                 # Infraestructura como código (Proxmox, Talos, bootstrap de K8s)
+│   ├── main.tf                # VMs, red, VIP y módulo de nodos Talos
+│   ├── talos-patches.tf       # Aplica los patches de talos/patches/init
+│   ├── k8s-bootstrap.tf       # Todo lo que se instala y configura tras el bootstrap
+│   ├── locals.tf              # k8s_path, talos_path, gitops_path y el mapa de VMs
+│   ├── variables.tf           # auto_config_cluster, sync_with_tf, is_development, gitops_branch, use_prod_domain...
+│   └── modules/talos-node/    # Módulo reutilizable por cada VM
+├── talos/
+│   ├── patches/init/          # Machine config patches por nodo (red, labels, VIP)
+│   └── configs/               # Generado por Terraform; no se versiona
+├── k8s/
+│   ├── bootstrap/             # TODO lo que aplica Terraform (ver tabla siguiente)
+│   └── apps/                  # Cargas de trabajo posteriores: una carpeta por aplicación
+├── gitops/
+│   ├── projects/              # AppProject (permisos y repositorios permitidos)
+│   ├── bootstrap/             # Application raíz (patrón App-of-Apps)
+│   ├── apps/                  # Applications con spec propia
+│   ├── appsets/               # ApplicationSet para componentes homogéneos
+│   └── generated/             # Un config.yaml por componente del ApplicationSet
+├── vault/policies/            # Políticas HCL de Vault (KV, PKI, plantillas por SA)
+├── scripts/                   # gitops-publish, gitops-health, validate-cluster, clean_kubeconfig
+├── tests/                     # Manifiestos y scripts de las pruebas documentadas
+├── Makefile                   # Entrypoint único de automatización
+├── README.md                  # Este documento
+└── VAULT_README.md            # Guía de Vault (instalación, políticas, PKI)
+```
+
+| Carpeta | Qué contiene | Quién la ejecuta |
+|---------|--------------|------------------|
+| `terraform/` | Aprovisionamiento de Proxmox, Talos y el bootstrap del clúster | `make tf-plan` / `make tf-apply` |
+| `talos/` | Parches de machine config y los configs generados | Terraform (`talos_machine_configuration_apply`) |
+| `k8s/bootstrap/` | Manifiestos y values que dejan el clúster en estado "ready to work" | Terraform (y Argo CD para los values) |
+| `k8s/apps/` | Manifiestos y values de las aplicaciones que se despliegan **encima** del bootstrap | Argo CD o `kubectl`/`helm` manual |
+| `gitops/` | `Application`, `ApplicationSet` y `AppProject`: la fuente de verdad de Argo CD | Argo CD |
+| `vault/policies/` | Políticas de Vault para ESO/VSO y para la PKI | Operador (CLI de Vault) |
+| `scripts/` | Automatización de apoyo: publicar GitOps, comprobar salud, validar el clúster | `make` ó ejecución directa del `.sh` |
+| `tests/` | Manifiestos y scripts de las pruebas de cada sección | Manual o `scripts/validate-cluster.sh` |
+
+### Dentro de `k8s/bootstrap/`
+
+`k8s/bootstrap/` es exactamente el universo que Terraform aplica: `local.k8s_path` apunta ahí (ver [`terraform/locals.tf`](terraform/locals.tf)), así que **todo lo que se añada a esa carpeta es responsabilidad de Terraform**.
+
+| Subcarpeta | Qué contiene | Criterio para decidir si algo va aquí |
+|------------|--------------|--------------------------------------|
+| `config/` | `Namespace`, `Certificate`, `ClusterIssuer`, `ServiceAccount`, RBAC, `CiliumLoadBalancerIPPool`/`CiliumL2AnnouncementPolicy` y CRs de operadores (`VaultConnection`, `VaultAuthGlobal`) | Objetos que **configuran** el clúster, no que ejecutan cargas de trabajo |
+| `deployments/` | Values de Helm (`*-values.yaml`), manifiestos de workload propios (`vault-cert-syncer-cronjob.yaml`) y `cloudflare-tunnel/` | Todo lo que **ejecuta** algo |
+| `gateway-api-crds/` | Copia vendorizada de las CRDs de Gateway API (`v1.4.1/`) | Material de terceros que se quiere tener **offline** |
+| `templates/` | Solo ficheros `.tpl` que se renderizan con `templatefile()` desde Terraform | Necesitan variables de Terraform en el momento del apply |
+| `optional/` | Manifiestos documentados (en [`VAULT_README.md`](VAULT_README.md)) que no forman parte del bootstrap aplicado | Referencia que se conserva sin aplicarse |
+
+> `k8s/apps/` sigue otra convención (una carpeta por aplicación, con subcarpetas solo cuando hacen falta) documentada al final de este README en [Convenciones de organización de manifiestos](#convenciones-de-organizaci%C3%B3n-de-manifiestos).
+
+---
+
 ## Arquitectura Física y Conectividad
 
 El TP-Link Archer AX55 manejará el enrutamiento y el Wi-Fi, mientras que el switch administrado TL-SG108E será el corazón de la red cableada. La conexión física se da entonces de la siguiente forma:
@@ -59,6 +119,8 @@ Para un homelab con Kubernetes (Talos) y Proxmox, no es buena idea tener IPs din
 |Proxmox VE - Nodo 1     | `192.168.0.10`             |Estática (Configurada en la ISO) |
 |Proxmox VE - Nodo 2     | `192.168.0.11`             |Estática (Configurada en la ISO) |
 |Futuras VMs (Talos K8s) | `192.168.0.30` en adelante |Estáticas / Reservas DHCP        |
+
+---
 
 
 
@@ -192,6 +254,15 @@ kubectl-argo-rollouts version
 # kubectl-argo-rollouts: v1.10.0+d90700a
 ```
 
+- **CLI de ArgoCD** (para gestionar ArgoCD vía CLI)
+```sh
+brew install argocd
+
+# Validar instalación
+argocd version
+# argocd: v3.6.1
+```
+
 Para validar que tenemos instaladas las dependencias que requerimos, podemos ejecutar `make check-deps`.
 
 
@@ -224,6 +295,8 @@ export TF_LOG_PATH="./terraform.log"
 export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
 mkdir -p $TF_PLUGIN_CACHE_DIR
 ```
+
+---
 
 
 
@@ -309,6 +382,8 @@ Para esto, se siguen los siguientes pasos en ambos nodos de Proxmox (pmx-01 y pm
    
    Este proceso lo debemos realizar en cada nodo (para más detalles, podemos ver [este video en YouTube](https://youtu.be/wNQ12uVFxyc?si=TaZryg4934bu8qWe&t=1654) a partir del minuto 27:34).
 
+---
+
 
 
 ## Optimización de Consumo de Energía
@@ -383,6 +458,8 @@ Dado que se van a manejar servicios pesados de datos (como SeaweedFS, Postgres y
 
 Además, no está de más asegurar que la interfaz de red virtual (`vmbr0`) esté lista para bridgear el tráfico de las futuras VMs hacia el switch (esto se valida en Datacenter -> pmx-01 > System > Network).
 
+---
+
 
 
 
@@ -390,6 +467,8 @@ Además, no está de más asegurar que la interfaz de red virtual (`vmbr0`) est�
 # Instalación de HashiCorp Vault en Proxmox
 
 Para ver cómo Instalar y Configurar HashiCorp Vault en nuestro HomeLab (el cual usaremos como almacen y administrador de secretos para nuestro clúster de Kubernetes), ir a su respectivo [README](VAULT_README.md) que se encuentra en este mismo repositorio.
+
+---
 
 
 
@@ -438,9 +517,14 @@ Para aprovechar al máximo los 32 hilos y 64 GB de RAM, dejando aproximadamente 
 
 3. **Aprovechamiento del Almacenamiento:** SeaweedFS se distribuirá entre el worker de datos y el de observabilidad, permitiendo simular un entorno S3 distribuido real usando los discos NVMe locales de ambas máquinas físicas.
 
+---
 
 
-## Configuración de las Credenciales que usará el Proveedor de Proxmox desde Terraform
+
+## Configurar Acceso para Acceder a Proxmox desde Terraform
+
+
+### Configuración de las Credenciales que usará el Proveedor de Proxmox desde Terraform
 
 _**Nota:** Los pasos a continuación describen la forma en que creamos el API Token de Autenticación en Proxmox que usaremos desde Terraform, sin embargo, en [este enlace](https://registry.terraform.io/providers/bpg/proxmox/0.110.0/docs#api-token-authentication) se detalla cómo podríamos hacerlo a través de la shell de cada Nodo de Proxmox._
 
@@ -472,7 +556,7 @@ Para que Terraform pueda conectarse a las Mini PCs y crear las VMs, necesita un 
 
 
 
-## Generar llave SSH para Acceder a Proxmox desde Terraform
+### Generar llave SSH para Acceder a Proxmox desde Terraform
 
 Aunque Talos no usa SSH de forma nativa (se administra 100% vía API con `talosctl`), y aunque el proveedor `bpg/proxmox` utiliza la API web (puerto `8006`) para casi todo (crear la estructura de las VMs, asignar RAM, CPUs y encenderlas), la infraestructura de Proxmox sí requiere la conectividad SSH de Terraform para preparar el terreno (que para nuestro caso de configuración automática, será para subir los snippets con la configuración 0).
 
@@ -518,9 +602,14 @@ ssh -i /Users/andres/.ssh/id_proxmox_terraform 'root@192.168.0.10'
 ssh -i /Users/andres/.ssh/id_proxmox_terraform 'root@192.168.0.11'
 ```
 
+---
 
 
-## Obtener la imagen inmutable de Talos Linux
+
+## Configurar Imagen inmutable de Talos Linux
+
+
+### Obtener la imagen inmutable de Talos Linux
 
 Talos Linux no utiliza instaladores tradicionales; funciona mediante imágenes de disco pre-construidas. Cuando el PC tiene un procesador AMD Ryzen moderno (como en el caso de mis mini PCs), es ideal que la imagen incluya el agente de QEMU para que Proxmox pueda ver métricas internas de la VM (como por ejemplo su IP real).
 
@@ -539,8 +628,7 @@ Para obtener la imagen preconstruída se deben seguir los siguientes pasos:
 6. Adicionalmente, se debe copiar ambién el enlace de la sección *Initial Installation*, ya que este lo necesitaremos al momento de generar la configuración de Talos. Este enlace debería tener la forma `factory.talos.dev/nocloud-installer/...:v1.13.4` donde los `...` corresponden al mismo checksum del enlace del archivo `iso`.
 
 
-
-## Descargar la imagen en el servidor Proxmox
+### Descargar (o subir) la imagen en el servidor Proxmox
 
 Después de haber generado la imagen de Talos, se debe agregar dicha imagen en cada Nodo de Proxmox. Aquí tenemos 2 opciones: subir un iso, o descargarla directamente al Nodo desde algún enlace.
 
@@ -552,6 +640,8 @@ En este caso, como en el paso anterior obutvimos un enlace, usaremos la opción 
 4. En el campo URL, pegar el enlace que habíamos obtenido y hacer clic en **Query URL**.
 5. En File name, podemos ajustar el nombre; Ese es el nombre con el quedará la iso en nuestro nodo Proxmox. En este caso, le pondré `talos-nocloud-amd64-with-qemu.iso`.
 6. Hacer clic en **Download**. Esto mostrará un cuadro de dialogo con el proceso de descarga; se debe esperar hasta que muestre `TASK OK`; en ese momento ya se puede cerrar ese cuadro de diálogo.
+
+---
 
 
 
@@ -596,6 +686,8 @@ Finalmente, hacemos clic en **Continue to summary** y luego en **Create Token**.
 
 **⚠️ Importante:** Debemos copiar el API token generado inmediatamente y guardarlo en un lugar seguro ya que Cloudflare no nos permitirá volver a ver el valor del token por motivos de seguridad.
 
+---
+
 
 
 ## Habilitar Acceso desde Internet con Cloudflare Tunnel
@@ -629,7 +721,7 @@ Así pues, los pasos para crear nuestro túnel son los siguientes:
    - En la págna de *Activate Zero Trust Free*, aceptar los términos y hacer clic en **Activate**.
    - En la página de confirmación y resumen, validar que el costo es $0, y hacer clic en **Continue to Zero Trust**.
 
-2. Ir a **Networks** -> **Tunnels & Mesh** (o puede que solo diga **Tunnels**) y hacer clic en **Create a tunnel**.
+2. Ir a **Networking** -> **Tunnels** (o puede que solo diga **Tunnels**) y hacer clic en **Create a tunnel**.
 
 3. Hacer clic en **Select Cloudflared**.
 
@@ -644,7 +736,7 @@ Así pues, los pasos para crear nuestro túnel son los siguientes:
 
 6. Después de guardarnos el token, hacemos clic en **Next**.
 
-7. Finalmente se nos muestra la página de *Route Traffic*. En esta página podremos configurar el acceso a algún servicio en específico dentro de la pestaña *Published applications*. Aquí es obligatorio configurar un acceso (a pesar de que aún no tengamos levantado ningún servicio) ya que hay campos que son obligatorios (como el *Domain*, *Type* y *URL*) para poder completar la configuración. Así que agregaremos un hostname y service de prueba que después podremos editar o eliminar:
+7. Finalmente se nos muestra la página de *Route Traffic*. En esta página podremos configurar el acceso a algún servicio en específico dentro de la pestaña *Published applications* (o *Routes* o algo así). Aquí es obligatorio configurar un acceso (a pesar de que aún no tengamos levantado ningún servicio) ya que hay campos que son obligatorios (como el *Domain*, *Type* y *URL*) para poder completar la configuración. Así que agregaremos un hostname y service de prueba que después podremos editar o eliminar:
    - En la sección **Hostname**:
      - **Subdomain:** prueba (o el valor que queramos)
      - **Domain:** seleccionamos nuestro dominio
@@ -655,6 +747,8 @@ Así pues, los pasos para crear nuestro túnel son los siguientes:
 8. Para terminar, hacer clic en **Complete setup**.
 
 Al finalizar, nos mostrará nuestro túnel en estado `Inactive`, ya que aún no tenemos ningún agente de `clauflared` corriendo, sin embargo, después de que levantemos dicho pod en nuestro clúster pasará a estado `Healthy`.
+
+---
 
 
 
@@ -689,6 +783,8 @@ Para gestionar dos nodos independientes de Proxmox que formarán un único clús
 
 - `talos-patches.tf`: Actualmente este archivo no contiene nada, pero en caso de que en el futuro se requiera realizar un cambio directamente sobre una VM (como por ejemplo cambiar los DNS), lo definiríamos en este archivo.
 
+---
+
 
 
 ## Inicialización y Despliegue de la Infraestructura
@@ -716,9 +812,17 @@ terraform -chdir=terraform apply
 # - auto_config_cluster=true -> Crea las VMs en Proxmox, hace el bootstrap del clúster y deja el clúster
 #   con todas las configuraciones necesarias para empezar a usarlo. Si se asigna a false, Solo crea las
 #   VMs y hace el bootstrap.
-# - is_development=true -> Configura un admisionControl de tal modo que no se tenga que agregar un label
-#   a cada namespace para forzar que los pods tengan privilegios. Para entornos productivos, lo ideal
-#   sería que estuviera seteado en false.
+# - sync_with_tf=false -> Define si se un componente se debe gestionar con Terraform o no; en caso de que no,
+#   debería ser instalado manualmente, ó gestionado con GitOps (ArgoCD).
+# - gitops_branch=main -> Indica la rama de la cual el App-of-Apps (root) de ArgoCD se va a traer los cambios
+#   del repositorio remoto de Git. Por defecto es 'main', pero si se están haciendo pruebas y no se quiere
+#   ensuciar la rama principal, se puede usar una rama alternativa.
+# - is_development=false -> Configura el admissionControl con la configuración `enforce: baseline`, lo que
+#   significa que todos los namespaces que se creen tendrán por defecto esa configuración; por lo tanto, si
+#   un pod debe crearse con privilegios (como por ejemplo OpenEBS), su namespace debe crearse aplicando el
+#   label `pod-security.kubernetes.io/enforce: privileged` (Ver sección de Pod Security Configuration de
+#   este README). Para casos de prueba puede dejarse en false, lo cual configuraría `enforce: baseline` y
+#   haría que todos los namespaces lo tengan por defecto (No recomendado en entornos de producción).
 # - use_local_iso=false -> Por defecto, el script descarga la imagen de Talos y la sube a cada nodo de
 #   Proxmox. En caso de tener problemas de conectividad a internet, lo ideal sería asignarlo en true, pero
 #   se debería subir la ISO como lo vimos anteriormente.
@@ -731,7 +835,9 @@ terraform -chdir=terraform apply
 # Aquí vemos un ejemplo de cómo usar estas variables:
 terraform -chdir=terraform apply \
   -var="auto_config_cluster=false" \
-  -var="is_development=false" \
+  -var="sync_with_tf=false" \
+  -var="gitops_branch=test/some-branch" \
+  -var="is_development=true" \
   -var="use_local_iso=true" \
   -var="use_prod_domain=false" \
   -var="use_letsencrypt_prod=true"
@@ -754,13 +860,21 @@ make tf-apply
 # En caso de querer pasar parámetros:
 make tf-apply \
   AUTO_CONFIG_CLUSTER=false \
-  IS_DEVELOPMENT=false \
+  SYNC_WITH_TF=false \
+  GITOPS_BRANCH="test/some-branch" \
+  IS_DEVELOPMENT=true \
   USE_LOCAL_ISO=true \
   USE_PROD_DOMAIN=false \
   USE_LETSENCRYPT_PROD=true
 ```
 
 Si no se obtiene ningún error, el `apply` creará las respectivas VMs en cada uno de los Nodos de Proxmox e inicializará el clúster (`bootstrap`). Además si se ejecuta con `auto_config_cluster=true`, se configurará todo el clúster de forma automática (CNI, Certificados, Almacenamiento, etc.).
+
+> **Doble dueño:** si `sync_with_tf=true`, Terraform instala el componente; en ese caso el `application.yaml` de ese componente **no debe estar publicado** en la rama (o root lo volvería a crear). Las dos vías son excluyentes, por eso, si se quiere usar ArgoCD para gestionar componentes del bootstrap (como es el caso de este Homelab, `sync_with_tf` debería ser `false`).
+
+---
+
+
 
 
 
@@ -772,7 +886,7 @@ Por lo general, para inicializar un clúster con Talos se suelen seguir una seri
 
 ## Opción A: Bootstrap Automático (Recomendada)
 
-El archivo `main.tf` está preparado para crear las VMs en Proxmox y aplicar la configuración 0 de las VMs de Talos. De este modo, al ejecutar `terraform apply`, se realizan los siguientes pasos:
+El archivo `main.tf` está preparado para crear las VMs en Proxmox y aplicar la configuración 0 de las VMs de Talos. De este modo, al ejecutar `terraform apply` (ó `make tf-apply`), se realizan los siguientes pasos:
 
 1. **Descarga de la ISO:** Terraform realiza la descarga automática de la ISO de Talos y se almacena en cada uno de los Nodos de Proxmox.
 2. **Creación de Snippets de Inicialización:** Se generan archivos YAML mediante un bloque `data` de tipo `talos_machine_configuration` y se almacenan como snippets en cada uno de los Nodos de Proxmox.
@@ -909,13 +1023,22 @@ cluster:
           apiVersion: pod-security.admission.config.k8s.io/v1
           kind: PodSecurityConfiguration
           defaults:
-            audit: privileged
-            audit-version: latest
+            # 'enforce' es el único modo que BLOQUEA. En desarrollo se deja en privileged
+            # para no frenar las pruebas (Cilium, OpenEBS y el connectivity test necesitan
+            # capacidades privilegiadas), pero 'audit' y 'warn' se mantienen en restricted
+            # para seguir recibiendo el aviso de qué rompería al endurecer el clúster.
             enforce: privileged
             enforce-version: latest
-            warn: privileged
+            audit: restricted
+            audit-version: latest
+            warn: restricted
             warn-version: latest
           exemptions:
+            # Se deja vacío: Talos exime 'kube-system' internamente y declararlo de nuevo
+            # hace fallar la validación por duplicidad (comprobado en Talos 1.13.4). Ahí
+            # viven Cilium, CoreDNS, metrics-server y kubelet-csr-approver, que no cumplen
+            # 'baseline'. Antes de endurecer 'enforce', verificar la exención con la sonda
+            # de la sección de Pod Security Admission.
             namespaces: []
             runtimeClasses: []
             usernames: []
@@ -1167,6 +1290,8 @@ talosctl -n 192.168.0.31 dashboard
 kubectl get pods -A -o wide
 ```
 
+---
+
 
 
 ## Controlar `talosctl` globalmente sin pisar otros clústeres
@@ -1249,6 +1374,8 @@ Talos validará: "*¿Tengo las llaves de cifrado del contexto activo para hablar
 
 Si no se desea usar la ruta absoluta del proyecto, siempre se puede igual acceder al directorio donde está el repositorio.
 
+---
+
 
 
 ## Eliminar el clúster de Talos y Kubernetes (Opcional)
@@ -1298,10 +1425,10 @@ Este mismo resultado podemos lograrlo ejecutando el siguiente Script:
 
 ```sh
 # Otorgamos permisos al script
-chmod +x clean_kubeconfig.sh
+chmod +x scripts/clean_kubeconfig.sh
 
 # Ejecutamos
-./clean_kubeconfig.sh # ó ./clean_kubeconfig.sh nombre-contexto
+./scripts/clean_kubeconfig.sh # ó ./scripts/clean_kubeconfig.sh nombre-contexto
 ```
 
 En caso de que no tengamos otros contextos de kubernetes configurados, podríamos simplemente ejecutar `rm -f ~/.kube/config`.
@@ -1354,13 +1481,15 @@ Aún así, del mismo modo que con kubernetes, en caso de que no tengamos otros c
 
 También hay que asegurarse de borrar de la carpeta local `talos/` del proyecto, los archivos `controlplane.yaml`, `worker.yaml` y `talosconfig` antiguos para que no causen confusiones (si hacemos el bootstrap del clúster de la forma automática (Opción A) y no hacemos modificaciones o patches manuales sobre dichos archivos, el comando `terraform destroy` también los eliminaría automáticamente).
 
+---
+
 
 
 
 
 # Configuración del Clúster
 
-_**NOTA DE DESARROLLADOR:** Cuando se ejecuta el comando `terraform apply` por defecto se hace con la variable `auto_config_cluster=true`, lo que significa que todo el proceso que detallo en esta sección de configuración se realizará de forma automática. Sin embargo, lo dejo documentado ya que fue el proceso manual que yo mismo seguí antes de pasar a automatizar todo con Terraform. Además es una gran fuente de documentación en la que no solo muestro los comandos para ejecutar cada paso, sino que también trato de explicar lo más detallado posible cada una de estas configuraciones._
+_**NOTA DE DESARROLLADOR:** Cuando se ejecuta el comando `terraform apply` (ó `make tf-apply`) por defecto se hace con la variable `auto_config_cluster=true`, lo que significa que todo el proceso que detallo en esta sección de configuración se realizará de forma automática. Sin embargo, lo dejo documentado ya que fue el proceso manual que yo mismo seguí antes de pasar a automatizar todo con Terraform (y Argo CD). Además es una gran fuente de documentación en la que no solo muestro los comandos para ejecutar cada paso, sino que también trato de explicar lo más detallado posible cada una de estas configuraciones._
 
 
 
@@ -1484,7 +1613,10 @@ helm repo update
 
 helm install kubelet-csr-approver kubelet-csr-approver/kubelet-csr-approver --version 1.2.14 \
   --namespace kube-system \
-  -f k8s/deployments/kubelet-csr-approver-values.yaml
+  -f k8s/bootstrap/deployments/kubelet-csr-approver-values.yaml
+
+# Validamos instalación del CSR approver
+kubectl get pods -n kube-system -o wide | grep -E "^NAME|kubelet-csr-approver"
 
 # Para validar quién firmó el certificado
 echo | openssl s_client -connect 192.168.0.40:10250 -showcerts 2>/dev/null | openssl x509 -noout -issuer -subject
@@ -1514,10 +1646,13 @@ helm repo update
 # Instalamos Cilium usando los valores configurados
 helm install cilium cilium/cilium --version 1.18.0 \
   --namespace kube-system \
-  -f k8s/deployments/cilium-values.yaml
+  -f k8s/bootstrap/deployments/cilium-values.yaml
 
 
-# NOTA: Si en este momento hacemos un 'kubectl get pods -A -n kube-system' veremos que el pod de
+# Validamos pods de Cilium y Hubble
+kubectl get pods -n kube-system -o wide | grep -E "^NAME|cilium|hubble"
+
+# NOTA: Si en este momento hacemos un 'kubectl get pods -n kube-system' veremos que el pod de
 # hubble-relay tendrá en Ready 0/1 de pods (a pesar de que el status sea Running). Esto se debe a
 # que aún no se ha configurado el servidor DNS del clúster (coreDNS), lo cual haremos a continuación
 
@@ -1538,7 +1673,7 @@ talosctl -n 192.168.0.31 logs -k kube-system/cilium-9dfmg:config:bcf171571b82
 talosctl -n 192.168.0.31 logs -k kube-system/cilium-9dfmg:clean-cilium-state:90f8ccbda429
 ```
 
-En el archivo `k8s/deployments/cilium-values.yaml` se pueden apreciar los bloques `cgroup` y `securityContext`, los cuales son específicos de Talos. Talos no monta automáticamente cgroup v2 como lo hace una distribución típica, por lo que es necesario indicarle a Cilium dónde encontrarlo.
+En el archivo `k8s/bootstrap/deployments/cilium-values.yaml` se pueden apreciar los bloques `cgroup` y `securityContext`, los cuales son específicos de Talos. Talos no monta automáticamente cgroup v2 como lo hace una distribución típica, por lo que es necesario indicarle a Cilium dónde encontrarlo.
 
 Por otro lado, las listas de capacidades (`securityContext.capabilities`) son más limitadas que las predeterminadas de Cilium porque Talos funciona con un perfil de seguridad más estricto y rechaza los pods que solicitan más recursos de los necesarios. Esto se debe a que en los valores por defecto, se incluye la capacidad `SYS_MODULE`, la cual le permite a un contenedor cargar dinámicamente módulos directamente en el kernel de Linux, mientras que Talos es un sistema operativo minimalista y ultra-seguro que bloquea por completo la carga de módulos de kernel desde cargas de trabajo de Kubernetes; es por esta razón que en nuestro archivo de values sobreescribimos dicha lista de capacidades.
 
@@ -1559,10 +1694,13 @@ helm repo update
 # Instalamos CoreDNS usando los valores configurados
 helm upgrade --install coredns coredns/coredns --version 1.46.0 \
   --namespace kube-system \
-  -f k8s/deployments/coredns-values.yaml
+  -f k8s/bootstrap/deployments/coredns-values.yaml
+
+# Validamos pods de CoreDNS
+kubectl get pods -n kube-system -o wide | grep -E "^NAME|coredns"
 ```
 
-En el archivo `k8s/deployments/coredns-values.yaml` especificamos reglas de `nodeAffinity` para que se instalen 3 instancias (para alta disponibilidad) de CoreDNS en nodos (VMs de Talos) de tipo `apps` (`worker-apps-01`), `data` (`worker-data-01`) y `ops` (`worker-ops-02`), en conjunto con reglas de `podAffinity` para indicarle además que intente por todos los medios no poner dos CoreDNS en el mismo nodo, pero si no hay otra opción, que las coloque juntas en pro de mantener las 3 réplicas vivas.
+En el archivo `k8s/bootstrap/deployments/coredns-values.yaml` especificamos reglas de `nodeAffinity` para que se instalen 3 instancias (para alta disponibilidad) de CoreDNS en nodos (VMs de Talos) de tipo `apps` (`worker-apps-01`), `data` (`worker-data-01`) y `ops` (`worker-ops-02`), en conjunto con reglas de `podAffinity` para indicarle además que intente por todos los medios no poner dos CoreDNS en el mismo nodo, pero si no hay otra opción, que las coloque juntas en pro de mantener las 3 réplicas vivas.
 
 
 ### Validar Instalación de Cilium en el Clúster
@@ -1625,7 +1763,7 @@ Adicionalmente, para una verificación más exhaustiva, podemos ejecutar una pru
 #   contenedores de prueba dándole privilegios a su namespace.
 #   https://docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium#known-issues
 cilium connectivity test --test '!pod-log-errors' \
-  --namespace-labels pod-security.kubernetes.io/enforce=privileged 
+  --namespace-labels pod-security.kubernetes.io/enforce=privileged
 
 # En caso de que no se eliminen automáticamente los namespaces después de la prueba, podemos ejecutar:
 cilium connectivity test --cleanup
@@ -1725,6 +1863,8 @@ kubectl rollout restart deployment coredns -n kube-system
 
 Finalmente eliminamos los namespaces que se habían creado previamente para la anterior prueba de conectividad (con `cilium connectivity test --cleanup`) y volvemos a lanzar la prueba.
 
+---
+
 
 
 ## Configuración del Balanceador local
@@ -1751,18 +1891,18 @@ l2announcements:
 A continuación, se crea el grupo de direcciones IP. Para esto se debe escoger un rango de IPs que estén por fuera del rango del servidor DHCP del router, y que tampoco estén siendo usadas por otro servicio (como por ejemplo la `.31` o la `.40`). En este caso, usaremos el rango que va desde la IP `192.168.0.70` hasta la `192.168.0.149`:
 
 ```sh
-kubectl apply -f k8s/cilium-ip-pool.yaml
+kubectl apply -f k8s/bootstrap/config/cilium-ip-pool.yaml
 
 # Para validar:
 kubectl get ciliumloadbalancerippool -A
 ```
 
-Si en el futuro queremos ajustar este rango de IPs, solamente debemos editar el rango en el archivo `k8s/cilium-ip-pool.yaml` y volver a aplicar los cambios.
+Si en el futuro queremos ajustar este rango de IPs, solamente debemos editar el rango en el archivo `k8s/bootstrap/config/cilium-ip-pool.yaml` y volver a aplicar los cambios.
 
 Por último, configuramos la Announcement policy. Ésta le indica a Cilium qué nodos deben responder a las solicitudes ARP para esas direcciones IP y a través de qué interfaces:
 
 ```sh
-kubectl apply -f k8s/cilium-l2-policy.yaml
+kubectl apply -f k8s/bootstrap/config/cilium-l2-policy.yaml
 
 # Para validar:
 kubectl get ciliuml2announcementpolicy -A
@@ -1770,7 +1910,7 @@ kubectl get ciliuml2announcementpolicy -A
 kubectl -n kube-system exec ds/cilium -- cilium status
 ```
 
-En el archivo `k8s/cilium-l2-policy.yaml` se configuraron las interfaces de red más comunes (`eth*`, `enp*`, `ens*`, etc.). Sin embargo, no está de más validar cuál es la interface que estamos usando. Para esto, podemos ejecutar lo siguiente (para al menos una VM por cada Nodo de Proxmox):
+En el archivo `k8s/bootstrap/config/cilium-l2-policy.yaml` se configuraron las interfaces de red más comunes (`eth*`, `enp*`, `ens*`, etc.). Sin embargo, no está de más validar cuál es la interface que estamos usando. Para esto, podemos ejecutar lo siguiente (para al menos una VM por cada Nodo de Proxmox):
 
 ```sh
 # List network interfaces (identificamos las que estén up)
@@ -1780,7 +1920,7 @@ talosctl get links --nodes 192.168.0.31
 talosctl get addresses --nodes 192.168.0.31
 ```
 
-En caso de que la interface de red no coincida con las que tenemos configuradas en `k8s/cilium-l2-policy.yaml`, debemos agregarla a dicho archivo en la sección `spec.interfaces`.
+En caso de que la interface de red no coincida con las que tenemos configuradas en `k8s/bootstrap/config/cilium-l2-policy.yaml`, debemos agregarla a dicho archivo en la sección `spec.interfaces`.
 
 
 ### Opción B: MetalLB
@@ -1805,8 +1945,10 @@ kubectl get pods -n metallb-system
 Posteriormente, aplicamos el manifiesto que configurará el pool de IPs que serán asignadas para los diversos servicios y que las anunciará para acceder a dichos servicios por fuera del clúster:
 
 ```sh
-kubectl apply -f k8s/metallb-config.yaml
+kubectl apply -f k8s/bootstrap/config/metallb-config.yaml
 ```
+
+---
 
 
 
@@ -1876,7 +2018,10 @@ helm repo update
 # Instalar cert-manager en su namespace dedicado
 helm install cert-manager jetstack/cert-manager --version 1.21.0 \
   --namespace cert-manager --create-namespace \
-  -f k8s/deployments/cert-manager-values.yaml
+  -f k8s/bootstrap/deployments/cert-manager-values.yaml
+
+# Validación de pods de Cert Manager
+kubectl get pods -n cert-manager -o wide | grep -E "^NAME|cert-manager"
 ```
 
 Esto nos proporcionará el controlador, los webhooks y los tres CRD (`Certificate`, `Issuer`, `ClusterIssuer`). Por defecto, no nos proporciona ningún emisor, por tanto, si solicitamos un certificado en este momento, fallará porque no hay nada que lo emita aún.
@@ -1894,7 +2039,7 @@ Así pues, este emisor (`selfsigned-issuer`) solo se utiliza para emitir exactam
 Para crear estos emisores, secreto y certificado, ejecutamos lo siguiente:
 
 ```sh
-kubectl apply -f k8s/internal-ca.yaml
+kubectl apply -f k8s/bootstrap/config/internal-ca.yaml
 
 # Para validar, ejecutamos los siguientes comandos (la columna READY debe marcar True):
 kubectl get clusterissuer -o wide
@@ -1909,7 +2054,7 @@ kubectl describe certificate internal-ca-cert -n cert-manager
 kubectl logs -n cert-manager -l app.kubernetes.io/instance=cert-manager --tail=100
 ```
 
-En este manifiesto multi-documento `k8s/internal-ca.yaml` podemos apreciar que los recursos de tipo `ClusterIssuer` no se crean sobre un namespace en específico; esto es porque en Kubernetes existen dos tipos de recursos: los que están aislados por namespace (como los Pods, Services o Issuer) y los que son globales para todo el clúster (como los Nodes, Namespaces o ClusterIssuer).
+En este manifiesto multi-documento `k8s/bootstrap/config/internal-ca.yaml` podemos apreciar que los recursos de tipo `ClusterIssuer` no se crean sobre un namespace en específico; esto es porque en Kubernetes existen dos tipos de recursos: los que están aislados por namespace (como los Pods, Services o Issuer) y los que son globales para todo el clúster (como los Nodes, Namespaces o ClusterIssuer).
 
 Los `ClusterIssuer` se diseñaron como un recurso global por arquitectura: Al no tener `namespace`, cualquier recurso `Certificate` de cualquier `namespace` del clúster puede utilizarlo para pedir un certificado. Si usáramos un `Issuer` común, tendríamos que clonar la configuración del emisor en cada namespace de las aplicaciones y servicios (Java, Go, Postgres, etc.), lo cual sería ineficiente.
 
@@ -1956,9 +2101,13 @@ Trust Manager es la solución. Se trata de un pequeño controlador (una instalac
 Como el repositorio es el mismo que ya habíamos añadido al instalar cert-manager, solo tenemos que instalar el componente:
 
 ```sh
+# Instalamos
 helm install trust-manager jetstack/trust-manager --version 0.24.0 \
   --namespace cert-manager \
-  -f k8s/deployments/trust-manager-values.yaml
+  -f k8s/bootstrap/deployments/trust-manager-values.yaml
+
+# Validamos pods de Trust manager
+kubectl get pods -n cert-manager -o wide | grep -E "^NAME|trust-manager"
 ```
 
 #### Paso B: Distribuir la confianza con el Bundle
@@ -1967,7 +2116,7 @@ Al aplicar el siguiente manifiesto, se le dice a trust-manager que tome la CA in
 
 ```sh
 # Crea el configmap cluster-trusted-ca en cada namespace
-kubectl apply -f k8s/trust-bundle.yaml
+kubectl apply -f k8s/bootstrap/config/trust-bundle.yaml
 
 # Para validar, listamos el ConfigMap
 kubectl get configmap cluster-trusted-ca -n default
@@ -1980,7 +2129,7 @@ kubectl describe configmap cluster-trusted-ca -n default
 kubectl logs -n cert-manager -l app.kubernetes.io/instance=trust-manager --tail=50
 ```
 
-En el manifiesto `k8s/trust-bundle.yaml` se puede apreciar que usamos `namespaceSelector.matchLabels: {}` que es un comparador vacío, mediante el cual propagamos el paquete (el certificado público) a cada namespace. Empezar de forma permisiva está bien porque el certificado público no es confidencial; solo la clave privada lo es, y esta nunca sale del namespace `cert-manager`.
+En el manifiesto `k8s/bootstrap/config/trust-bundle.yaml` se puede apreciar que usamos `namespaceSelector.matchLabels: {}` que es un comparador vacío, mediante el cual propagamos el paquete (el certificado público) a cada namespace. Empezar de forma permisiva está bien porque el certificado público no es confidencial; solo la clave privada lo es, y esta nunca sale del namespace `cert-manager`.
 
 Entonces, en resumen, el propósito de este Bundle no es ayudar a Cilium a descifrar el tráfico, sino ayudar a las aplicaciones internas a confiar en nuestra CA interna, y para esto, copia un ConfigMap llamado `cluster-trusted-ca` en todos los namespaces del clúster. Así, si en el futuro un Pod dentro del clúster necesita consumir un servicio a través de `https://eljavatar.home`, ese Pod podrá montar dicho ConfigMap para saber que la entidad que firmó el Gateway (`internal-ca-issuer`) (lo cual veremos más adelante) es de total confianza.
 
@@ -2032,6 +2181,8 @@ _**Nota de desarrollador:** Si bien con este ejemplo mostramos cómo cargar el c
 
 Con esto cubrimos la comunicación TLS entre cargas de trabajo. Las siguientes secciones gestionan los enlaces: el tráfico entrante desde internet y el tráfico entre el `apiserver` y los `kubelets`.
 
+---
+
 
 
 ## Let's Encrypt para el borde público (Tráfico entrante desde Internet)
@@ -2074,12 +2225,12 @@ Anteriormente habíamos creado un API Token de Cloudflare. Para que el `ClusterI
 
 1. Copiar la plantilla de ejemplo para crear el archivo local:
    ```sh
-   cp k8s/cloudflare-secret.yaml.example k8s/cloudflare-secret.yaml
+   cp k8s/bootstrap/config/cloudflare-secret.yaml.example k8s/bootstrap/config/cloudflare-secret.yaml
    ```
 2. Abrir `cloudflare-secret.yaml` con el editor y reemplazar `"TOKEN_DE_CLOUDFLARE_AQUÍ"` por el API Token real.
 3. Aplicar el secreto en el clúster:
    ```bash
-   kubectl apply -f k8s/cloudflare-secret.yaml
+   kubectl apply -f k8s/bootstrap/config/cloudflare-secret.yaml
    ```
 
 Otra alternativa sería crearlo directamente sin usar un manifiesto (reemplazar `"TOKEN_DE_CLOUDFLARE_AQUÍ"` por el API Token real):
@@ -2116,26 +2267,28 @@ A continuación vemos los pasos para crear el `ClusterIssuer`, y debido a que en
 export PERSONAL_EMAIL="personal@example.com"
 export CLOUDFLARE_ACCOUNT_EMAIL="cloudflare-account@example.com"
 # Paso B: Usamos envsubst para reemplazar los marcadores ${VAR} antes de pasarle el resultado a kubectl
-envsubst < k8s/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
-envsubst < k8s/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
 
 # Opción 2: Creando variables de entorno en el archivo .env
 # Paso A: Agregamos las variables de entorno al archivo .env
 PERSONAL_EMAIL=personal@example.com
 CLOUDFLARE_ACCOUNT_EMAIL=cloudflare-account@example.com
 # Paso B: Lee el .env, inyecta los valores en memoria temporal y se los pasa a kubectl sin modificar el
-# archivo físico k8s/letsencrypt-stage-cluster-issuer.yaml
-export $(cat .env | xargs) && envsubst < k8s/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
-export $(cat .env | xargs) && envsubst < k8s/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
+# archivo físico k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml | kubectl apply -f -
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml | kubectl apply -f -
 
 # Opción 3: Modificando el manifiesto
-# Paso A: Reemplazar en el archivo k8s/letsencrypt-stage-cluster-issuer.yaml los marcadores ${VAR}
+# Paso A: Reemplazar en el archivo k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml los marcadores ${VAR}
 # según el valor correspondiente
 # Paso B: Ejecutar el comando de kubectl
 # Al escoger esta opción, lo ideal sería agregar estos archivos al .gitignore
-kubectl apply -f k8s/letsencrypt-stage-cluster-issuer.yaml
-kubectl apply -f k8s/letsencrypt-prod-cluster-issuer.yaml
+kubectl apply -f k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml
+kubectl apply -f k8s/bootstrap/config/letsencrypt-prod-cluster-issuer.yaml
 
+# Ver que en la lista de emisores se haya creado el de Let's Encrypt
+kubectl get clusterissuer -o wide
 
 # Para validar que se haya creado el emisor y el secreto, podemos ejecutar lo siguiente:
 kubectl describe clusterissuer letsencrypt-stage-issuer
@@ -2144,9 +2297,11 @@ kubectl describe clusterissuer letsencrypt-stage-issuer
 kubectl describe secret -n cert-manager letsencrypt-stage-account-key
 ```
 
-_**Nota de desarrollo 1:** Para pruebas iniciales, se recomienda usar la URL de staging `https://acme-staging-v02.api.letsencrypt.org/directory` para evitar bloquear nuestro dominio por exceder los límites de intentos de Let's Encrypt si algo falla en las credenciales de Cloudflare (`k8s/letsencrypt-stage-cluster-issuer.yaml`). Los certificados de prueba no son de confianza pública, pero los límites de frecuencia son flexibles, por lo que un certificado mal configurado que reintente indefinidamente no agotará su cuota. En contraste, en producción se aplican 50 certificados por dominio registrado por semana y 5 certificados duplicados por semana; un bucle en un certificado defectuoso alcanzaría ambos límites en una hora._
+_**Nota de desarrollo 1:** Para pruebas iniciales, se recomienda usar la URL de staging `https://acme-staging-v02.api.letsencrypt.org/directory` para evitar bloquear nuestro dominio por exceder los límites de intentos de Let's Encrypt si algo falla en las credenciales de Cloudflare (`k8s/bootstrap/config/letsencrypt-stage-cluster-issuer.yaml`). Los certificados de prueba no son de confianza pública, pero los límites de frecuencia son flexibles, por lo que un certificado mal configurado que reintente indefinidamente no agotará su cuota. En contraste, en producción se aplican 50 certificados por dominio registrado por semana y 5 certificados duplicados por semana; un bucle en un certificado defectuoso alcanzaría ambos límites en una hora._
 
 _**Nota de desarrollo 2:** Podemos crear los 2 `ClusterIssuer` sin problema y con total seguridad (el de `letsencrypt-stage` y el de `letsencrypt-prod`), ya que en esta instancia aún no se ha generado ningún Certificado; sin embargo, en los siguientes pasos, si no estamos seguros si el Certificado que se va a generar puede estar defectuoso o no, sería mejor crear dicho certificado usando solo el emisor `letsencrypt-stage-issuer`._
+
+---
 
 
 
@@ -2159,19 +2314,19 @@ A continuación, tenemos los comandos para generar el Certificado:
 ```sh
 # 1. En primer lugar, como los certificados deben estar en el mismo namespace que el Gateway,
 #    creamos primero dicho namespace:
-kubectl apply -f k8s/gateway-api-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-namespace.yaml
 
 # 2. Creamos el Certificado local
-kubectl apply -f k8s/cert-gateway-local.yaml
+kubectl apply -f k8s/bootstrap/config/cert-gateway-local.yaml
 
 # 3. Creamos el Certificado de Let's Encrypt para Stage
 # Este solo aplicaría si tenemos dominio y creamos el ClusterIssur de Let's Encrypt (sección anterior)
-kubectl apply -f k8s/cert-letsencrypt-public.yaml
+kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml
 ```
 
 Al aplicar este último manifiesto, `cert-manager` detectará el `ClusterIssuer` de Cloudflare, creará el registro TXT en nuestro DNS y, tras validarlo, depositará las llaves TLS en el Secret `cert-letsencrypt-public-secret`. Posteriormente cuando creemos nuestro Gateway de Cilium, éste leerá ese Secret inmediatamente y empezará a servir tráfico web seguro desde Internet.
 
-Adicionalmente, en `k8s/cert-letsencrypt-public.yaml` se puede apreciar que configuramos explícitamente `privateKey` con el algoritmo **`ECDSA` de 256 bits** en lugar del clásico RSA. Esto lo hicimos así porque las llaves ECDSA son significativamente más pequeñas, consumen menos ancho de banda en el handshake TLS y ofrecen el mismo nivel de seguridad criptográfica, lo cual reduce el consumo de CPU en el proxy de Cilium.
+Adicionalmente, en `k8s/bootstrap/config/cert-letsencrypt-public.yaml` se puede apreciar que configuramos explícitamente `privateKey` con el algoritmo **`ECDSA` de 256 bits** en lugar del clásico RSA. Esto lo hicimos así porque las llaves ECDSA son significativamente más pequeñas, consumen menos ancho de banda en el handshake TLS y ofrecen el mismo nivel de seguridad criptográfica, lo cual reduce el consumo de CPU en el proxy de Cilium.
 
 _**Nota:** El proceso de validación DNS de Let's Encrypt con Cloudflare tarda usualmente entre 1 y 3 minutos. Podemos monitorear el estado con `kubectl get certificate -n gateway-api-system`._
 
@@ -2214,7 +2369,7 @@ Como mencionamos anteriormente, el proceso de validación puede tomar varios min
 
 ### Usar el ClusterIssuer de Let's Encrypt de Producción
 
-Si el validar el estado con `kubectl get certificate -n gateway-api-system` vemos que queda en `READY=True`, y no vamos a volver a recrear el Certificado (por ejemplo no necesitamos hacer más pruebas de crear/eliminar un certificado), podemos editar el archivo `k8s/cert-letsencrypt-public.yaml` para que use el `ClusterIssuer` que le pega al ACME de Let's Encrypt de Producción:
+Si el validar el estado con `kubectl get certificate -n gateway-api-system` vemos que queda en `READY=True`, y no vamos a volver a recrear el Certificado (por ejemplo no necesitamos hacer más pruebas de crear/eliminar un certificado), podemos editar el archivo `k8s/bootstrap/config/cert-letsencrypt-public.yaml` para que use el `ClusterIssuer` que le pega al ACME de Let's Encrypt de Producción:
 
 ```yaml
 spec:
@@ -2227,7 +2382,7 @@ spec:
 Después de hacer el ajuste, solo debemos guardar y aplicar de nuevo el manifiesto:
 
 ```sh
-kubectl apply -f k8s/cert-letsencrypt-public.yaml
+kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml
 ```
 
 Al aplicarlo, `cert-manager` detectará el cambio de configuración, se comunicará con el servidor real de Let's Encrypt, resolverá el nuevo desafío DNS y sobreescribirá el contenido de `cert-letsencrypt-public-secret` con las llaves de producción firmadas legalmente. Por otro lado, Cilium (gracias a Envoy) detectará el cambio en el Secret en caliente y comenzará a servir el nuevo certificado válido sin necesidad de reiniciar el Gateway (en caso de ya haberlo levantado) ni interrumpir las conexiones de los usuarios.
@@ -2237,6 +2392,8 @@ De nuevo podemos hacer las mismas validaciones que hicimos con el de stage, pero
 _**Nota 1:** Es muy importante que esto lo hagamos solo si estamos seguros de que este va a ser el Certificado definitivo y no tenemos necesidad de recrear el Certificado, ya que si por ejemplo se genera con éxito el mismo certificado de producción 5 veces en una semana, Let's Encrypt bloqueará las solicitudes para ese subdominio específico durante los siguientes 7 días, causando que no se pueda generar un certificado válido para dicho dominio (en este caso `*.eljavatar.org`) usando Let's Encrypt hasta que se cumpla la ventana de tiempo (una semana desde la primera emisión). Además, esto causaría que los usuarios externos que intenten entrar a las aplicaciones vean la pantalla roja de "Conexión no segura", ya que Cilium no tendrá llaves de producción para mostrarles._
 
 _**Nota 2:** En caso de que por alguna razón llegue a ocurrir un bloqueo en un entorno productivo real, hay que tener en cuenta que dicho bloqueo es solo para Let's Encrypt. Por tanto, como alternativa de emergencia, podríamos crear temporalmente un `ClusterIssuer` apuntando a otra entidad certificadora gratuita alternativa que use el mismo protocolo ACME (como ZeroSSL o Bypass), o degradar temporalmente el tráfico del Gateway usando el `internal-ca-issuer` mientras se espera a que expire la penalización de Let's Encrypt._
+
+---
 
 
 
@@ -2272,14 +2429,14 @@ Cilium revolucionó la forma de desplegar proxies con su arquitectura moderna en
 
 ### Levantar el Gateway de Cilium
 
-Una vez que los certificados que creamos anteriormente pasen a estado `READY: True`, aplicamos nuestro Gateway global ejecutando lo siguiente (en caso de que no tengamos un dominio en Cloudflare, y por ende no hayamos configurado el certificado emitido por Let's Encrypt, en el archivo `k8s/gateway-api-external.yaml` deberíamos comentar o eliminar el listener `https-publico`):
+Una vez que los certificados que creamos anteriormente pasen a estado `READY: True`, aplicamos nuestro Gateway global ejecutando lo siguiente (en caso de que no tengamos un dominio en Cloudflare, y por ende no hayamos configurado el certificado emitido por Let's Encrypt, en el archivo `k8s/bootstrap/config/gateway-api-external.yaml` deberíamos comentar o eliminar el listener `https-publico`):
 
 ```sh
 # Creamos el namespace (Solo en caso de que no lo hayamos creado previamente)
-kubectl apply -f k8s/gateway-api-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-namespace.yaml
 
 # Creamos el Gateway
-kubectl apply -f k8s/gateway-api-external.yaml
+kubectl apply -f k8s/bootstrap/config/gateway-api-external.yaml
 
 # Para validar, ejecutamos lo siguiente
 kubectl get gateway -n gateway-api-system
@@ -2348,7 +2505,7 @@ De esta forma, Cilium le asignará la IP `10.0.50.1` a este Gateway, y si alguie
 
 ### Configurar Redirección HTTP Global
 
-Si revisamos el manifiesto `k8s/gateway-api-external.yaml` podemos ver que dejamos un listener para el trafíco `http` (puerto `80`). Hoy en día, **ninguna aplicación debería servir tráfico en texto plano (HTTP)** por motivos de seguridad. Sin embargo, los usuarios en Internet (o incluso uno mismo en la red local) rara vez escriben `https://` en la barra de direcciones; lo normal es escribir simplemente por ejemplo `eljavatar.home`.
+Si revisamos el manifiesto `k8s/bootstrap/config/gateway-api-external.yaml` podemos ver que dejamos un listener para el trafíco `http` (puerto `80`). Hoy en día, **ninguna aplicación debería servir tráfico en texto plano (HTTP)** por motivos de seguridad. Sin embargo, los usuarios en Internet (o incluso uno mismo en la red local) rara vez escriben `https://` en la barra de direcciones; lo normal es escribir simplemente por ejemplo `eljavatar.home`.
 
 Cuando hacemos esto, el navegador intenta conectarse por defecto al puerto `80` (HTTP). Si eliminamos por completo el listener HTTP del Gateway, tendríamos el siguiente resultado:
 
@@ -2364,19 +2521,99 @@ Así pues, para automatizar la redirección global de HTTP a HTTPS sin necesidad
 Para esto, aplicamos el siguiente manifiesto:
 
 ```sh
-kubectl apply -f k8s/global-http-redirect.yaml
+kubectl apply -f k8s/bootstrap/config/global-http-redirect.yaml
 
 # Para validar, lanzamos un curl apuntando explícitamente al protocolo http:// (puerto 80):
 # Prueba A: validando el dominio local
-curl -vI --resolve "api.eljavatar.home:80:192.168.0.70" "http://api.eljavatar.home"
+curl -vI --resolve "playground.eljavatar.home:80:192.168.0.70" "http://playground.eljavatar.home"
+curl -vI --resolve "test.neobank.eljavatar.home:80:192.168.0.70" "http://test.neobank.eljavatar.home"
 # Prueba B: validando el dominio público
-curl -vI --resolve "api.eljavatar.org:80:192.168.0.70" "http://api.eljavatar.org"
+curl -vI --resolve "playground.eljavatar.org:80:192.168.0.70" "http://playground.eljavatar.org"
+curl -vI --resolve "test.neobank.eljavatar.org:80:192.168.0.70" "http://test.neobank.eljavatar.org"
 
 # En ambos casos, deberíamos ver una salida como la siguiente:
 HTTP/1.1 301 Moved Permanently
-location: https://api.eljavatar.home:443/ # O https://api.eljavatar.org:443/
+location: https://playground.eljavatar.home:443/ # O https://playground.eljavatar.org:443/
 server: envoy
 ```
+
+
+### Profundidad de subdominios: listeners, wildcards y certificados
+
+El wildcard del Gateway (`*.eljavatar.home`) y el wildcard del certificado (`*.eljavatar.home`) **no se comportan igual**, y esa diferencia es la que decide cuántos listeners se necesitan.
+
+| Capa | Semántica del wildcard | ¿Cubre `some.domain.eljavatar.home`? |
+|------|------------------------|--------------------------------------|
+| Hostname del listener (Gateway API) | Coincidencia por **sufijo**, uno **o más** labels | Sí, según la especificación |
+| Certificado TLS (X.509, RFC 2818 y RFC 6125) | **Exactamente un** label | **No** |
+| Cilium 1.18 | Traduce el hostname del listener a cadenas SNI de Envoy; hay bugs abiertos con listeners wildcard combinados con hostnames concretos ([#44118](https://github.com/cilium/cilium/issues/44118), [#44123](https://github.com/cilium/cilium/issues/44123)) | No fiable |
+
+Con el wildcard `*.eljavatar.home` el cliente fallaría en el **handshake TLS** si le llega una petición tipo `some.domain.eljavatar.home` antes de que el listener importe, así que la restricción real la impone el certificado. De ahí la regla:
+
+> **Un listener por árbol de wildcard y un certificado por dominio de confianza** que incluya todos los SANs necesarios. Cada `HTTPRoute` fija su listener con `parentRefs[].sectionName`.
+
+#### ¿Y `*.*.eljavatar.home`?
+
+No sirve, por dos razones independientes y cada una suficiente por sí sola:
+
+1. **La API lo rechaza.** En el tipo `Hostname` de Gateway API el `*` solo puede aparecer como **primer label único**: `*.eljavatar.home` es válido, `*.*.eljavatar.home` no pasa la validación del CRD, porque el segundo `*` no es un label DNS válido. El `kubectl apply` del Gateway fallaría.
+2. **Aunque una CA privada lo firmara, los clientes lo rechazan.** En X.509 (RFC 6125 / RFC 2818) el wildcard cubre exactamente un label, y las implementaciones reales (Go `crypto/x509`, Chrome, Firefox) consideran inválido un `dNSName` con wildcard repetido o no izquierdo, y descartan el **certificado completo**, no solo ese nombre. Un `*.*.eljavatar.home` no solo no ampliaría la cobertura a `a.b.eljavatar.home`, sino que rompería también los nombres que si funcionan con el wildcard `*.eljavatar.home`.
+
+#### Qué hacer según lo que se necesite
+
+| Necesidad | Solución |
+|-----------|----------|
+| `grafana.eljavatar.home` | Ya cubierto por `*.eljavatar.home` |
+| `api.apps.eljavatar.home` | SAN `*.apps.eljavatar.home` en el `Certificate` + listener `https-local-apps` con `hostname: "*.apps.eljavatar.home"` |
+| Nombres arbitrarios a cualquier profundidad | Un SAN **exacto** por nombre; con la CA interna es barato, porque el certificado se re-emite solo |
+| `*.*.eljavatar.home` | Imposible: no es un hostname válido ni un `dNSName` válido |
+
+#### Ejemplo: añadir el árbol `*.apps`
+
+1. Ampliar el certificado interno (en [`k8s/bootstrap/config/cert-gateway-local.yaml`](k8s/bootstrap/config/cert-gateway-local.yaml)):
+
+```yaml
+  dnsNames:
+    - "eljavatar.home"
+    - "*.eljavatar.home"
+    - "*.apps.eljavatar.home"   # cubre api.apps.eljavatar.home
+```
+
+2. Añadir el listener (en [`k8s/bootstrap/config/gateway-api-external.yaml`](k8s/bootstrap/config/gateway-api-external.yaml)), reutilizando **el mismo** `Secret` (lo que distingue al listener es el `hostname`, no el certificado):
+
+```yaml
+    - name: https-local-apps
+      port: 443
+      protocol: HTTPS
+      hostname: "*.apps.eljavatar.home"
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: cert-gateway-local-secret
+```
+
+3. Repetir para el dominio público (en [`k8s/bootstrap/config/cert-letsencrypt-public.yaml`](k8s/bootstrap/config/cert-letsencrypt-public.yaml) más el listener `https-publico-apps` en [`k8s/bootstrap/config/gateway-api-external.yaml`](k8s/bootstrap/config/gateway-api-external.yaml)) y para la plantilla [`k8s/bootstrap/templates/gateway-api-external.yaml.tpl`](k8s/bootstrap/templates/gateway-api-external.yaml.tpl), o las dos vías de instalación divergerían.
+4. En la ruta, fijar el listener: `parentRefs[].sectionName: https-local-apps`.
+5. Crear el registro DNS correspondiente (Pi-hole o `/etc/hosts` para `.home`, Cloudflare para `.org`), ya que el certificado no crea DNS.
+
+Detalles que conviene tener presentes:
+
+- **Precedencia:** exacto antes que wildcard, wildcard antes que «sin hostname», y entre wildcards gana el que tiene más puntos a la derecha. `*.apps.eljavatar.home` se evalúa antes que `*.eljavatar.home`, así que compartir el puerto 443 no introduce ambigüedad.
+- **Let's Encrypt:** un wildcard exige validación **DNS-01**. Ya está resuelto porque el `ClusterIssuer` usa el token de Cloudflare, pero cada wildcard SAN consume su propio registro TXT y cuenta para los límites de emisión semanales.
+- **Trust bundle:** no se toca. Los nombres nuevos los sigue firmando la misma CA interna, ya distribuida por `trust-manager`.
+- **Alternativa más simple:** quitar el `hostname` del listener `https-local` y dejar que el certificado con todos los SANs atienda cualquier nombre. Es válido según la especificación (el wildcard gana sobre el listener sin hostname), pero ese listener pasa a ser el *fallback* de todo y la corrección depende de cómo implemente la precedencia el proveedor; hoy hay bugs abiertos en Cilium en esa zona.
+- **Verificación:** `kubectl get certificate -n gateway-api-system` y, para el SAN realmente presentado:
+  `openssl s_client -connect 192.168.0.70:443 -servername api.apps.eljavatar.home </dev/null 2>/dev/null | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'`
+
+#### Regla de nomenclatura
+
+> El primer nivel (`servicio.eljavatar.home`) es la norma. El segundo se reserva para **grupos funcionales con wildcard propio** (`*.apps`, `*.tools`, `*.db`). Los nombres sueltos de dos niveles (`grafana.prod.eljavatar.home`) obligan a un SAN exacto por nombre y terminan en certificados inmanejables.
+
+---
 
 
 
@@ -2389,7 +2626,7 @@ Para esto, seguimos los siguientes pasos:
 1. Creamos un namespace dentro del cual correrá nuestro agente:
 
 ```sh
-kubectl apply -f k8s/deployments/cloudflare-tunnel/namespace.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/namespace.yaml
 ```
 
 2. Creamos un secreto con el token que habíamos guardado previamente cuando creamos el tunnel en Cloudflare (no confundir con el API Token que usamos para los certificados) (para esto, tenemos 3 opciones):
@@ -2400,21 +2637,21 @@ kubectl apply -f k8s/deployments/cloudflare-tunnel/namespace.yaml
 export CLOUDFLARE_TUNNEL_TOKEN="token_del_tunnel"
 # Paso B: Usamos envsubst para reemplazar el marcador ${CLOUDFLARE_TUNNEL_TOKEN} antes de
 # pasarle el resultado a kubectl
-envsubst < k8s/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
+envsubst < k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
 
 # Opción 2: Creando la variable de entorno en el archivo .env
 # Paso A: Agregamos la variable de entorno al archivo .env
 CLOUDFLARE_TUNNEL_TOKEN=token_del_tunnel
 # Paso B: Lee el .env, inyecta los valores en memoria temporal y se los pasa a kubectl sin modificar el
-# archivo físico k8s/deployments/cloudflare-tunnel/secret.yaml
-export $(cat .env | xargs) && envsubst < k8s/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
+# archivo físico k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml
+export $(cat .env | xargs) && envsubst < k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml | kubectl apply -f -
 
 # Opción 3: Modificando el manifiesto
-# Paso A: Reemplazar en el archivo k8s/deployments/cloudflare-tunnel/secret.yaml el marcador
+# Paso A: Reemplazar en el archivo k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml el marcador
 # ${CLOUDFLARE_TUNNEL_TOKEN}
 # Paso B: Ejecutar el comando de kubectl
 # Al escoger esta opción, lo ideal sería agregar este archivo al .gitignore
-kubectl apply -f k8s/deployments/cloudflare-tunnel/secret.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/secret.yaml
 
 
 # Validamos que se creó el Secret (en data debe contener TUNNEL_TOKEN)
@@ -2428,7 +2665,7 @@ export CLOUDFLARE_TUNNEL_TOKEN=$(kubectl get secret --namespace cloudflare-tunne
 
 ```sh
 # Esto levantará 2 réplicas del pod:
-kubectl apply -f k8s/deployments/cloudflare-tunnel/deployment.yaml
+kubectl apply -f k8s/bootstrap/deployments/cloudflare-tunnel/deployment.yaml
 
 # Validamos el estado de los pods
 kubectl get pods -n cloudflare-tunnel-system -o wide
@@ -2437,9 +2674,11 @@ kubectl get pods -n cloudflare-tunnel-system -o wide
 kubectl logs -l app=cloudflared -n cloudflare-tunnel-system --tail=50
 ```
 
-En cuanto los Pods de `cloudflared` pasen a `Running`, veremos en la interfaz web de Cloudflare Zero Trust (en *Network -> Tunnels & Mesh*) que el estado del túnel cambia a un círculo verde que dice `Healthy`.
+En cuanto los Pods de `cloudflared` pasen a `Running`, veremos en la interfaz web de Cloudflare Zero Trust (en *Networking -> Tunnels*) que el estado del túnel cambia a un círculo verde que dice `Healthy`.
 
 En caso de que hayamos levantado el agente, pero por alguna razón deje de estar disponible (porque por ejemplo la VM sobre la cual se instaló no está disponible), el estado del túnel cambiará a un círculo rojo que dice `Down`.
+
+---
 
 
 
@@ -2497,11 +2736,19 @@ OpenEBS proporciona diferentes motores de almacenamiento (LocalPV, Mayastor, etc
 helm repo add openebs https://openebs.github.io/openebs
 helm repo update
 
-# Instalamos en un nuevo namespace
+# PRIMERO creamos el namespace con el nivel de Pod Security que OpenEBS necesita.
+# El provisioner de hostpath monta el directorio de datos del nodo y corre privilegiado,
+# así que con el default 'enforce: baseline' sus pods serían rechazados en la admisión.
+# Etiquetar antes de instalar evita que el Deployment se quede reintentando con FailedCreate.
+kubectl apply -f k8s/bootstrap/config/openebs-namespace.yaml
+
+# Instalamos SIN --create-namespace (el namespace ya existe y ya está etiquetado)
 helm upgrade --install openebs openebs/openebs --version 4.5.1 \
-  -n openebs --create-namespace \
-  -f k8s/deployments/openebs-values.yaml
+  -n openebs \
+  -f k8s/bootstrap/deployments/openebs-values.yaml
 ```
+
+> La etiqueta del namespace manda sobre `defaults.enforce` de la machine config, así que este paso funciona igual si el clúster tiene `privileged`, `baseline` o `restricted` como default. Ver [Pod Security Admission](#pod-security-admission-niveles-matriz-por-componente-y-comprobaciones).
 
 Para verificar que se haya creado el StorageClass, ejecutamos lo siguiente:
 
@@ -2584,7 +2831,349 @@ Si en Proxmox le agregamos un segundo disco virtual exclusivo a `worker-data-01`
 
 Sin embargo, como LVM y ZFS requieren binarios en el host que Talos Linux no incluye por su naturaleza minimalista, la única forma de lograr esto en Talos v1.13+ es utilizando el nuevo motor `rawfile` (el cual deberíamos activar en el values configurando `engines.local.rawfile.enabled: true`, además de los provisioners para `engines.local.lvm` y/o `engines.local.zfs`).
 
+---
 
+
+
+## Modelo de responsabilidades: Bootstrap con Terraform vs. GitOps con Argo CD
+
+Antes de [instalar los componentes utilitarios](#instalación-de-componentes-utilitarios) que veremos posteriormente, conviene dejar claro **quién es el dueño de qué**. En este Homelab conviven dos planos de automatización, y cada uno tiene su propia fuente de verdad:
+
+- **Terraform (bootstrap):** aprovisiona la infraestructura (Proxmox, Talos, red) y deja el clúster en un estado desde el cual Argo CD puede trabajar. Su fuente de verdad es el código HCL y su `terraform.tfstate`.
+- **Argo CD (GitOps):** instala y mantiene los componentes que **no** forman parte de esa base. Su fuente de verdad es este repositorio de Git.
+
+Mezclar ambos planos sin una regla explícita produce el peor escenario posible: **dos dueños peleando por el mismo release de Helm** (Terraform lo reinstala con `helm upgrade` y Argo CD lo revierte al estado de Git, en un bucle perpetuo).
+
+
+### La regla de corte
+
+> Terraform instala lo que **no puede depender de Argo CD para existir** (cosas como Cilium, CoreDNS, Certificados y el Gateway API no deberían depender de Argo CD). Argo CD instala lo que **puede romperse sin dejarnos sin Argo CD** (cosas como descheduler pueden romperse/caerse y Argo CD seguiría funcionando).
+
+El criterio no es "cuánto pesa el componente" ni "si es de plataforma o no", sino responder dos preguntas por cada componente nuevo:
+
+1. ¿Argo CD necesita este componente para ser **alcanzable**, **confiable** o **reinstalable**? → **Terraform**.
+2. ¿Si este componente se cae o se desinstala por error, **seguimos entrando a Argo CD** para arreglarlo? → **Argo CD**.
+
+
+### Las tres capas
+
+```mermaid
+flowchart TD
+    subgraph CAPA0[Capa 0 - Terraform bootstrap]
+        T1[Talos y VMs en Proxmox]
+        T2[Gateway API CRDs y kubelet-csr-approver]
+        T3[Cilium y CoreDNS]
+        T4[cert-manager, trust-manager, CA interna y trust bundle]
+        T5[Gateway, certificados y redireccion HTTP]
+        T6[Vault Settings, ESO y VSO con su cadena de confianza]
+        T7[Argo CD, AppProject, root y ApplicationSet]
+    end
+    subgraph CAPA1[Capa 1 - App-of-Apps]
+        A1[gitops/apps/componente/application.yaml]
+    end
+    subgraph CAPA2[Capa 2 - ApplicationSet]
+        A2[gitops/generated/componente/config.yaml]
+    end
+    T1 --> T2 --> T3 --> T4 --> T5 --> T6 --> T7
+    T7 --> A1
+    T7 --> A2
+    A1 --> R[Recursos en el cluster]
+    A2 --> R
+```
+
+
+### Tabla de responsabilidades
+
+| Componente | Capa | Instalado por | Por qué ahí |
+|------------|------|---------------|-------------|
+| Proxmox, VMs, Talos, kubeconfig | 0 | **Terraform** | Es la infraestructura; no existe nada antes de ella |
+| CRDs de Gateway API y `kubelet-csr-approver` | 0 | **Terraform** | Prerrequisitos de Cilium y del TLS de kubelet: sin ellos no hay API server sano |
+| Cilium, CoreDNS, IP pool y L2 policy | 0 | **Terraform** | Sin red no hay pods, ni DNS, ni Argo CD |
+| cert-manager, trust-manager, CA interna y trust bundle | 0 | **Terraform** | El certificado que usa Argo CD en el Gateway se emite aquí; ver la subsección sobre el [problema del huevo y la gallina](#el-problema-del-huevo-y-la-gallina-que-sí-importa) |
+| Secret de Cloudflare, `ClusterIssuer` de Let's Encrypt, certificados del Gateway, Gateway y redirección HTTP | 0 | **Terraform** | Sin Gateway, Argo CD no es alcanzable desde el navegador ni desde el CLI |
+| Agente de `cloudflared` | 0 | **Terraform** | Es la vía de entrada externa; si se rompe, se pierde el acceso al propio Argo CD desde el exterior |
+| [Operadores Para Manejar Secretos Externos](#operadores-para-manejar-secretos-externos): TokenReviewer, RBAC, `VaultConnection`, `VaultAuthGlobal`, ESO y VSO | 0 | **Terraform** | [Decisión de consistencia de este Homelab](#frontera-entre-terraform-y-argo-cd-el-caso-de-los-operadores-de-secretos) (todo el ciclo de secretos en Terraform) y [cadena de confianza del repo privado](#repositorio-privado-la-cadena-de-confianza-problema-del-huevo-o-la-gallina) |
+| [Argo CD (GitOps)](#argo-cd-gitops): chart, `AppProject`, `root` y `ApplicationSet` | 0 | **Terraform** | Es el bootstrap; no puede instalarse a sí mismo |
+| [Instalación de OpenEBS](#instalaci%C3%B3n-de-openebs) | 0 → 2 | **Terraform** (hoy) | Es el candidato natural a migrar: chart + values puro. Solo puede migrarse si ninguna aplicación de la wave 0 necesita PVC (por el momento no lo vamos a migrar) |
+| [Argo Rollouts](#argo-rollouts) | 2 | **Argo CD** | No es requisito de nada que esté por debajo; si se cae, Argo CD sigue entrando |
+| [Reloader](#reloader) | 2 | **Argo CD** | Chart + values, encaja en el catálogo del `ApplicationSet` |
+| [Descheduler](#descheduler) | 2 | **Argo CD** | Ídem: es un optimizador, no un prerrequisito |
+| [Metrics Server](#metrics-server) | 2 | **Argo CD** | Ídem: solo alimenta HPAs y `kubectl top` |
+| [OpenFeature Operator](#openfeature-operator) | 2 | **Argo CD** | Depende de cert-manager, que ya está arriba, así que Argo CD puede esperarlo por salud |
+| Componentes futuros | 1 o 2 | **Argo CD** | Un upgrade de versión no debería requerir tocar HCL ni un `terraform apply` |
+
+> **Cómo se materializa en el código:** los `helm_release` de la capa 1 y 2 siguen existiendo en `terraform/k8s-bootstrap.tf` pero están condicionados a `count = var.auto_config_cluster && var.sync_with_tf ? 1 : 0`. Con `sync_with_tf = false` (el modo recomendado) Terraform **no** los toca y los instala Argo CD; con `sync_with_tf = true` Terraform reproduce el bootstrap completo sin depender de Git ni del acceso a Argo CD (modo de emergencia o "Terraform-first").
+
+
+### El problema del huevo y la gallina que sí importa
+
+Técnicamente Argo CD podría instalarse sin Gateway (siempre queda `kubectl port-forward`) y, por tanto, `cert-manager` podría ser una Application más. Sin embargo, en este caso no lo hago por una razón práctica: el primer día que `cert-manager`, la CA interna o el `HTTPRoute` fallen, tendría que entrar por `port-forward` a reparar el componente que emite los certificados con los que ingreso a Argo CD. Lo mismo aplica a `cloudflared` y a los operadores de secretos: son la cadena de confianza del propio Argo CD; de nuevo: Argo CD debe evitar las cargas de trabajo que no puede permitirse el lujo de romper.
+
+En conclusión, **la capa 0 no debe contener ninguna dependencia de Git**, salvo la credencial con la que Argo CD lee el repositorio (en caso de ser un repositorio privado).
+
+
+### Orden de instalación
+
+Como mencioné antes, en este Homelab conviven dos planos de automatización (Terraform y Argo CD), además de que también está la opción de hacer el bootstrap manual que se documenta a lo largo de este README.md. En cualquier caso, el orden de ejecución es el mismo (como se pudo apreciar en el [diagrama de capas](#las-tres-capas)), lo único que cambia es **quién ejecuta los últimos pasos** según el valor del argumento `sync_with_tf`:
+
+| Grupo de pasos | Bootstrap manual | `make tf-apply` con `sync_with_tf = false` | `make tf-apply` con `sync_with_tf = true` |
+|----------------|------------------|--------------------------------------------|-------------------------------------------|
+| Red (CRDs, Cilium, CoreDNS, IP pool, L2) | `kubectl` / `helm` a mano | Terraform | Terraform |
+| Cadena TLS (cert-manager, trust-manager, CA, bundle) | `helm` a mano | Terraform | Terraform |
+| Borde (Gateway, certificados, redirect, cloudflared) | `kubectl` a mano | Terraform | Terraform |
+| Vault y operadores de secretos | `kubectl` / `helm` a mano | Terraform | Terraform |
+| Argo CD y sus objetos (`AppProject`, `root`, `ApplicationSet`) | `helm` + `kubectl apply` | Terraform | Terraform |
+| Componentes utilitarios | Un `kubectl apply -f gitops/apps/<componente>/application.yaml` + `argocd app sync` por cada uno | **Argo CD** (Terraform solo espera) | Terraform |
+
+**Consecuencia práctica:** al usar `make tf-apply`, **no se deberían repetir a mano** los pasos del último grupo, ya que ejecutarlos a mano sobre un componente que ya sincroniza Argo CD crea el doble dueño que toda esta sección intenta evitar.
+
+
+### Cómo añadir un componente utilitario nuevo
+
+1. Añadir el `values.yaml` en `k8s/bootstrap/deployments/<componente>-values.yaml` (así lo comparten Terraform y Argo CD: una sola fuente de valores).
+2. Elegir mecanismo:
+   - **Es un chart de Helm con un `values.yaml`** → crear `gitops/generated/<componente>/config.yaml` con `name`, `namespace`, `chartRepo`, `chart`, `chartVersion`, `valuesFile` y `syncWave`.
+   - **Necesita una spec a mano** (multi-source no homogéneo, CRs sueltos, `ignoreDifferences`, hooks) → crear `gitops/apps/<componente>/application.yaml`.
+   - **Cuidado con el `ref: values` en una Application escrita a mano:** su `targetRevision` es un valor fijo y Terraform solo reescribe la revisión del `root` y del `ApplicationSet`. Si el componente necesita values de este repositorio y quieres poder probarlo en ramas `test/<tema>`, va al `ApplicationSet`; una Application a mano leería los values de `main` y fallaría con `no such file or directory` mientras el layout de la rama difiera.
+3. Elegir la wave según las dependencias reales: `0` almacenamiento, `10-20` operadores base, `30-40` utilidades, `50` cargas que dependen de todo lo anterior.
+4. Si el componente debe bloquear `make tf-apply` hasta estar sano, añadirlo a la lista de espera de `terraform_data.argocd_wait_gitops`.
+5. `git commit` + `git push` (o `make gitops-publish` si se está probando en una rama `test/<tema>`). No se necesita `terraform apply`.
+
+
+### Cómo retirar un componente
+
+Depende de **quién lo creó**, y el orden de los pasos importa. En la siguiente tabla vemos un resumen; el detalle y los comandos están en la sección [Desinstalar un componente gestionado desde Git](#desinstalar-un-componente-gestionado-desde-git):
+
+| Dueño | Qué hacer | Qué pasa si se hace al revés |
+|-------|-----------|------------------------------|
+| Application temporal (`argocd app create`) | `argocd app delete <app> --cascade --yes` + borrar el namespace si procede | Nada: no está en Git, nadie la recrea |
+| `root` (App-of-Apps) | Quitar el manifiesto de Git y hacer `push` **primero**, luego `argocd app delete` | `selfHeal` de `root` la recrea y el componente se reinstala |
+| `ApplicationSet` | Quitar el `config.yaml` de Git y hacer `push`; **no** borrar la Application a mano | El controlador la regenera al siguiente reconcile |
+
+### La espera activa del bootstrap: cuándo se ejecuta y cómo verificar el estado
+
+`terraform_data.argocd_wait_gitops` usa un provisioner `local-exec`, y los provisioners de Terraform **solo se ejecutan al crear o reemplazar el recurso**. Tras el primer `apply` el recurso queda en el state, los planes siguientes no ven cambios y la espera **no vuelve a correr**. Es deliberado:
+
+- **Lo que garantiza:** que `make tf-apply` falle ruidosamente si el bootstrap no dejó la plataforma en pie (manifiesto no publicado en la rama, `directory.include` mal configurado, `ApplicationSet` apuntando a otra rama). Ese es un evento de **creación**.
+- **Cómo lo comprueba:** para cada componente exige `sync.status=Synced` **y** `health.status=Healthy`, no solo la salud. Un error de generación de manifiestos (por ejemplo un `valueFiles` que no existe en la rama) deja `sync=Unknown` con `health=Healthy`, así que esperar solo por `health` lo daría por bueno. Si agota el tiempo, imprime las condiciones de la `Application` (donde Argo deja el `ComparisonError` con el mensaje exacto).
+- **Lo que no garantiza:** el estado del clúster en el día 2, y no debería. Un `Progressing` transitorio (un rollout en curso, un pod reiniciando, un HPA escalando) no es un fallo de infraestructura; hacer fallar `terraform apply` por eso acopla dos responsabilidades distintas.
+
+| Si se quiere… | Cómo |
+|---------------|------|
+| Ver el estado ahora mismo | `make gitops-health` (tabla con `SYNC` y `HEALTH`; solo falla si falta una Application) |
+| Que un componente roto rompa el comando | `make gitops-health-strict` (falla si algo no está `Synced`/`Healthy`) |
+| Forzar la espera de Terraform una vez | `terraform -chdir=terraform apply -replace='terraform_data.argocd_wait_gitops[0]'` |
+| Re-ejecutarla en cada `apply` | `triggers_replace = { always_run = timestamp() }`: el `plan` deja de converger y muestra `must be replaced` siempre |
+| Re-ejecutarla solo cuando se decida | `triggers_replace = { nonce = var.gitops_wait_nonce }` y subir el nonce |
+
+Si el `local-exec` falla, Terraform deja el recurso en estado *tainted* y el siguiente `apply` lo reemplaza y reintenta solo. El reemplazo es inocuo porque `terraform_data` no declara provisioner de `destroy`.
+
+#### Por qué la comprobación de salud no vive en Terraform
+
+`scripts/gitops-health.sh` toma `KUBECONFIG` del entorno y, si no está definido, usa `talos/kubeconfig` (el mismo que inyectan los provisioners de [`terraform/k8s-bootstrap.tf`](terraform/k8s-bootstrap.tf)). Separa dos juicios que no son equivalentes:
+
+1. **Existencia (siempre fatal):** si la `Application` no existe, el árbol de GitOps está incompleto → `exit 1` con los tres diagnósticos habituales.
+2. **Salud (informativa por defecto):** `OutOfSync` o `Degraded` se reportan como aviso → `exit 0`, salvo que se pida lo contrario.
+
+```sh
+# Otorgamos permisos al script
+chmod +x scripts/gitops-health.sh
+
+make gitops-health                              # tabla + avisos, sale 0
+make gitops-health-strict                       # sale 1 si algo no está Synced/Healthy
+make gitops-health GITOPS_APPS="root reloader"  # revisar un subconjunto
+```
+
+El mismo script sirve para dos contextos distintos: una revisión rutinaria o de CI (informativa) y la comprobación estricta cuando se quiere un gate real. La espera del bootstrap queda como estaba: una sola vez, estricta y bloqueante.
+
+---
+
+
+
+## Pod Security Admission: niveles, matriz por componente y comprobaciones
+
+Talos aplica **Pod Security Admission** (PSA) a todos los namespaces. La configuración de este Homelab está en el patch de los control planes (ver [Crear los Parches de Red Estática](#crear-los-parches-de-red-est%C3%A1tica-machine-config-patches)): `enforce` condicional (`privileged` en desarrollo, `baseline` en el resto), `audit` y `warn` siempre en `restricted`, y `kube-system` exento por Talos.
+
+Dos ideas explican casi todas las dudas que aparecen con PSA:
+
+1. **La etiqueta del namespace siempre gana al default del clúster.** Si un namespace lleva `pod-security.kubernetes.io/enforce`, el valor de `defaults.enforce` de la machine config es irrelevante para él. Por eso, etiquetar bien el namespace hace que el componente funcione **igual** con `privileged`, `baseline` o `restricted` como default.
+2. **Los niveles son acumulativos: `restricted` es un superconjunto de `baseline`.** Un pod que cumple `restricted` cumple `baseline` automáticamente, así que **dejar un namespace sin etiqueta (default `baseline`) no rompe** ningún componente que ya cumpla `restricted`.
+
+#### Qué controla cada nivel
+
+PSA evalúa **el `podSpec` en el momento de la admisión**: no mira RBAC, ni red, ni imágenes. Los niveles son acumulativos.
+
+| Control | `baseline` | `restricted` |
+|---------|------------|--------------|
+| `hostProcess` | Prohibido | Prohibido |
+| Host namespaces (`hostNetwork`, `hostPID`, `hostIPC`) | **Prohibido** | Prohibido |
+| Contenedores `privileged: true` | **Prohibido** | Prohibido |
+| `capabilities.add` | Solo la lista por defecto (`AUDIT_WRITE`, `CHOWN`, `KILL`, `NET_BIND_SERVICE`, `SETUID`, `SYS_CHROOT`, …) | Obligatorio `drop: [ALL]`; solo se permite reañadir `NET_BIND_SERVICE` |
+| `hostPath` | **Prohibido** | Prohibido |
+| `hostPort` | Prohibido | Prohibido |
+| `seccompProfile` | No puede ser `Unconfined` | Obligatorio `RuntimeDefault` o `Localhost` |
+| `allowPrivilegeEscalation` | Sin restricción | Obligatorio `false` |
+| `runAsNonRoot` y `runAsUser` | Sin restricción | Obligatorio `true` y distinto de `0` |
+| Tipos de volumen | Cualquiera | Solo `configMap`, `csi`, `downwardAPI`, `emptyDir`, `ephemeral`, `persistentVolumeClaim`, `projected` y `secret` |
+| AppArmor, SELinux, `procMount`, sysctls | Solo perfiles y valores seguros | Idem |
+
+#### Nivel mínimo que necesita cada componente
+
+| Componente | Namespace | Nivel mínimo | ¿Etiqueta obligatoria? | Qué lo obliga |
+|------------|-----------|--------------|------------------------|---------------|
+| Cilium (agent y operator) | `kube-system` | **privileged** | No: namespace exento | `privileged`, `hostNetwork`, `hostPath` (`/sys/fs/bpf`, `/var/run/cilium`) y capabilities de BPF/SYS_ADMIN |
+| Metrics Server | `kube-system` | **privileged** | No: namespace exento | `hostNetwork: true` (viola host namespaces) |
+| kubelet-csr-approver | `kube-system` | **privileged** | No: namespace exento | Host namespaces según el chart |
+| Descheduler | `kube-system` | restricted | No: namespace exento | Nada: ya es non-root, con `drop: ALL` y seccomp |
+| **OpenEBS** (provisioner de hostpath) | `openebs` | **privileged** | **Sí** | `hostPath` al directorio de datos y montaje privilegiado |
+| cert-manager y trust-manager | `cert-manager` | restricted | No, opcional | Nada: los charts ya son non-root, con seccomp y `drop: ALL` |
+| ESO y VSO | `external-secrets`, `vault-secrets-operator` | restricted | No, opcional | Nada con los values de los charts oficiales |
+| Argo CD | `argocd` | restricted | No, opcional | Nada con el chart actual |
+| Argo Rollouts | `argo-rollouts` | restricted | No, opcional | Nada |
+| Reloader | `reloader` | restricted | No, opcional | Nada con el chart reciente |
+| OpenFeature Operator | `open-feature-operator-system` | restricted | No, opcional | Nada (non-root 65532, `readOnlyRootFilesystem`) |
+| cloudflared | `cloudflare-tunnel-system` | restricted | No, opcional | Nada (non-root, `readOnlyRootFilesystem`, `drop: ALL`) |
+| `cilium connectivity test` | `cilium-test` | **privileged** | **Sí**, mientras dure la prueba | `NET_RAW`, capabilities y pods de cliente privilegiados |
+| CronJob `vault-cert-syncer` | `shared-ops` | baseline | No | Su imagen corre como root, así que incumple `runAsNonRoot` de `restricted` |
+| Demos de `tests/` (nginx, Argo Rollouts) | los que se creen | baseline | No | nginx corre como root por defecto |
+
+**Conclusión:** la única etiqueta **obligatoria** de larga duración es la de **OpenEBS**. Las del resto son endurecimiento opcional: no hacen falta para que funcionen (porque `restricted` implica `baseline`), pero actúan como alambre trampa si un `helm upgrade` introduce un `hostPath` o un usuario root.
+
+#### Qué hay que tocar en cada caso: el namespace sí, el `values.yaml` no
+
+El nivel de PSA es una **etiqueta del namespace**, no un valor del chart: **no se modifica ningún `values.yaml`**. Solo tocaríamos los `values` si un chart no fuese compliant y hubiera que inyectarle `securityContext`, y ninguno de los que usamos aquí lo necesita.
+
+Regla de orden: **la etiqueta va antes que los pods**. Si se instala primero, el Deployment se queda reintentando con `FailedCreate` y, con `helm install --wait`, el comando termina en timeout. Y recordando la idea nº1: una vez etiquetado el namespace, da igual cómo esté `enforce` en la machine config.
+
+| Componente | Namespace | Nivel | Manual | Terraform | Argo CD |
+|------------|-----------|-------|--------|-----------|---------|
+| OpenEBS | `openebs` | **privileged, obligatorio** | `kubectl apply -f k8s/bootstrap/config/openebs-namespace.yaml` y después `helm upgrade --install` **sin** `--create-namespace` | el mismo manifiesto vía `kubectl_manifest` + `create_namespace = false` en el `helm_release` | `managedNamespaceMetadata.labels` + `CreateNamespace=true` |
+| cert-manager y trust-manager | `cert-manager` | restricted, opcional | `kubectl label ns cert-manager ...` antes o después de instalar | namespace con `metadata.labels` y `create_namespace = false` | `managedNamespaceMetadata` |
+| ESO y VSO | `external-secrets`, `vault-secrets-operator` | restricted, opcional | añadir `metadata.labels` en `k8s/bootstrap/config/eso-namespace.yaml` y `k8s/bootstrap/config/vso-namespace.yaml` | esos manifiestos ya los aplica Terraform | `managedNamespaceMetadata` |
+| Argo CD, Argo Rollouts, Reloader, OpenFeature Operator | `argocd`, `argo-rollouts`, `reloader`, `open-feature-operator-system` | restricted, opcional | `kubectl label ns ...` | namespace con labels y `create_namespace = false` | `managedNamespaceMetadata` en cada Application |
+| cloudflared | `cloudflare-tunnel-system` | restricted, opcional | editar `k8s/bootstrap/deployments/cloudflare-tunnel/namespace.yaml` | ese manifiesto ya lo aplica Terraform | `managedNamespaceMetadata` |
+| `kube-system`, `gateway-api-system`, `shared-ops` y namespaces de aplicaciones | — | baseline, default | **nada** | **nada** | **nada** |
+
+Para el enfoque GitOps, el campo que hace el trabajo es `managedNamespaceMetadata`:
+
+```yaml
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true   # obligatorio: sin esto, managedNamespaceMetadata no hace nada
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+```
+
+Argo CD **sobrescribe** las etiquetas del namespace con lo que se declare ahí, así que ese campo pasa a ser la única fuente de verdad para ese namespace.
+
+#### Cómo cumple una aplicación
+
+El patrón que ya usan cert-manager, Argo CD y cloudflared:
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+Las cuatro vías de escape cuando el manifiesto no cumple:
+
+1. **Imagen no-root:** usar la variante que ya existe (distroless `nonroot`, `nginx-unprivileged`, Bitnami sin root) o fijar un `runAsUser` válido. Es el caso más común.
+2. **Puerto menor que 1024:** añadir solo `capabilities.add: [NET_BIND_SERVICE]` (permitido incluso en `restricted`) o mover el contenedor a 8080 y mapear en el `Service`.
+3. **`hostPath`:** sustituir por `emptyDir` (caché), `persistentVolumeClaim` (datos) o `configMap`/`secret` (configuración). Si el volumen **es** el host (CNI, CSI, exporters de nodo), no hay forma de cumplir y habría que agregar la etiqueta de `priviligied` (como en el caso de OpenEBS).
+4. **Namespace dedicado con `enforce: privileged`,** con contrapartidas: `NetworkPolicy` deny por defecto, sin exposición externa, RBAC mínimo y una nota que explique la excepción.
+
+#### Comprobar qué se violaría al endurecer un namespace
+
+`--dry-run=server` **no consulta el estado actual**: le pide al API server que *simule* el cambio de etiqueta y le responda qué pasaría. La salida es del tipo *"Warning: existing pods in namespace X violate the new PodSecurity enforce level"* y lista los pods que serían rechazados **la próxima vez que se creen**. No modifica nada.
+
+Y hace falta precisamente porque **endurecer un namespace no mata los pods que ya están corriendo**: PSA solo evalúa en la creación, así que un pod con `hostPath` sigue vivo en un namespace que se ha endurecido a `restricted` hasta que se reinicia… y en ese momento ya no arranca. La simulación es la forma barata de descubrirlo (pongo de ejmplo el namespace de `argocd` que creamos en las [siguientes secciones](#argo-cd-gitops)):
+
+```sh
+# 1. ¿Puedo endurecer este namespace a restricted? (simula, no cambia nada)
+#    Este lo muestro con el namespace de argocd el cual se crearía con el
+#    enforce por defecto que es baseline
+kubectl label --dry-run=server --overwrite ns argocd \
+  pod-security.kubernetes.io/enforce=restricted
+
+# 2. Ver el nivel vigente de un namespace (si no tiene etiqueta, aplica el default del clúster)
+kubectl get ns argocd -o jsonpath='{.metadata.labels}'
+
+# 3. Distinguir un rechazo en la admisión de un fallo en tiempo de ejecución
+kubectl get events -A --field-selector reason=FailedCreate | grep -i podsecurity
+
+# 4. Confirmar que 'kube-system' sigue exento antes de pasar 'enforce' a baseline
+kubectl run probe --namespace kube-system --image=busybox --restart=Never \
+  --dry-run=server -o yaml \
+  --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox","securityContext":{"privileged":true}}]}}' >/dev/null
+# En caso que 'kube-system' no estuviera excento, se obtendría una salida como la siguiente:
+# Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false
+# (container "probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted
+# capabilities (container "probe" must set securityContext.capabilities.drop=["ALL"]),
+# runAsNonRoot != true (pod or container "probe" must set securityContext.runAsNonRoot=true),
+# seccompProfile (pod or container "probe" must set securityContext.seccompProfile.type
+# to "RuntimeDefault" or "Localhost")
+```
+
+El punto 4 es el que evita sorpresas: Talos exime `kube-system` internamente y **repetirlo explícitamente en `exemptions.namespaces` hace fallar la validación de la machine config por duplicidad** (comprobado en Talos 1.13.4), así que la lista se deja vacía. Antes de pasar `enforce` a `baseline`, conviene confirmar con esa sonda que la exención sigue vigente: si no lo estuviera, los pods de Cilium no podrían recrearse.
+
+#### Política de etiquetas de este Homelab
+
+La regla es la de seguridad en general: **el default es el estricto y las excepciones son explícitas, pocas y visibles en Git**.
+
+| Qué | ¿Automatizar? | Motivo |
+|-----|---------------|--------|
+| `enforce: privileged` en **todos** los namespaces | **No** | Es equivalente a `enforce: privileged` global, pero disfrazado y con posible deriva entre Git y el clúster (ya que con GitOps no podemos versionar lo que se ejecute con el comando `kubectl label`) |
+| El label del nivel **mínimo** en el manifiesto de cada namespace | **Sí** | Queda declarativo, revisable en un PR y junto al componente que lo necesita |
+| Un test que exija label explícito en todo namespace | **Sí** | Convierte la excepción en una decisión y no en un olvido |
+| Un namespace fijo para las pruebas de conectividad | **Sí** | Evita cambiar la configuración del clúster para una prueba puntual |
+
+| Namespace | Label |
+|-----------|-------|
+| `kube-system` | Sin etiqueta: exento por Talos |
+| `openebs` | `pod-security.kubernetes.io/enforce=privileged` (obligatorio) |
+| `cert-manager`, `external-secrets`, `vault-secrets-operator`, `argocd`, `argo-rollouts`, `reloader`, `open-feature-operator-system`, `cloudflare-tunnel-system` | `pod-security.kubernetes.io/enforce=restricted` (endurecimiento opcional, pero pueden quedarse en el default `baseline`) |
+| `gateway-api-system`, `shared-ops`, namespaces de aplicaciones | Sin etiqueta: se quedan en el default `baseline` |
+
+Para las pruebas de conectividad, crear el namespace ya etiquetado (y reutilizarlo en cada ejecución) en lugar de relajar el clúster:
+
+```sh
+kubectl create namespace cilium-test --dry-run=client -o yaml | kubectl apply -f -
+kubectl label namespace cilium-test pod-security.kubernetes.io/enforce=privileged --overwrite
+
+# Si la versión del CLI lo soporta, apuntar la prueba a ese namespace:
+cilium connectivity test --test-namespace cilium-test
+# Si no, el flag que ya usamos en la sección de la prueba:
+cilium connectivity test --namespace-labels pod-security.kubernetes.io/enforce=privileged
+```
+
+#### Por qué el default se queda en `baseline` y no en `privileged`
+
+El default protege exactamente los namespaces que **no** se etiquetan a mano: los que crea Argo CD con `CreateNamespace=true`, los que crea un chart de Helm, los efímeros de `cilium connectivity test`, los de CI y los que se crean a las 2 de la mañana durante un incidente. Son la mayoría de los namespaces a lo largo del tiempo, y son los que no se controlan.
+
+En desarrollo se mantiene `enforce: privileged` (para no frenar las pruebas) pero con `audit` y `warn` en `restricted`: es el **modo observación** que recomienda Kubernetes y el que permite endurecer más adelante sin sorpresas, porque ya se sabe qué workloads fallarían.
+
+---
 
 ## Instalación de Componentes utilitarios
 
@@ -2632,13 +3221,13 @@ Para eso, ejecutamos los siguientes comandos:
 
 ```sh
 # Creamos el namespace
-kubectl apply -f k8s/external-auth-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/external-auth-namespace.yaml
 
 # Creamos la ServiceAccount del Reviewer y su respectivo token
-kubectl apply -f k8s/vault-token-reviewer-setup.yaml
+kubectl apply -f k8s/bootstrap/config/vault-token-reviewer-setup.yaml
 ```
 
-Cabe recalcar que a partir de Kubernetes 1.24+, las Service Accounts ya no guardan un token estático y permanente en un objeto tipo `Secret`, por eso, como se puede apreciar en el archivo `k8s/vault-token-reviewer-setup.yaml`, tuvimos que crear explícitamente un secreto de larga duración de tipo `kubernetes.io/service-account-token`.
+Cabe recalcar que a partir de Kubernetes 1.24+, las Service Accounts ya no guardan un token estático y permanente en un objeto tipo `Secret`, por eso, como se puede apreciar en el archivo `k8s/bootstrap/config/vault-token-reviewer-setup.yaml`, tuvimos que crear explícitamente un secreto de larga duración de tipo `kubernetes.io/service-account-token`.
 
 Después de esto, podemos ejecutar los siguientes comandos para obtener los datos que necesitamos para configurar el método de autenticación de Kubernetes en Vault (en el [README de Vault](VAULT_README.md#3-extraer-datos-para-configurar-la-autenticaci%C3%B3n-en-vault) mostramos cómo usar estos datos):
 
@@ -2687,20 +3276,20 @@ Para crear este `CronJob` ejecutamos los siguientes comandos:
 ```sh
 # 1. Crear los namespaces
 # Creamos el namespace donde correrá el job
-kubectl apply -f k8s/shared-ops-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/shared-ops-namespace.yaml
 # Creamos los namespaces donde se insalarán posteriormente los operadores ESO y VSO, ya
 # que dentro de ellos crearemos el ConfigMap y Secret con el certificado TLS de Vault.
 # Además en estos también crearemos el RoleBinding que necesita la ServiceAccount del Job
-kubectl apply -f k8s/eso-namespace.yaml
-kubectl apply -f k8s/vso-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/eso-namespace.yaml
+kubectl apply -f k8s/bootstrap/config/vso-namespace.yaml
 
 # 2. Crear y Asignar permisos mediante RBAC (Role-Based Access Control)
 # El CronJob necesita permisos exclusivos para actualizar el ConfigMap y el Secert que
 # leen los operadores ESO y VSO
-kubectl apply -f k8s/vault-cert-syncer-rbac.yaml
+kubectl apply -f k8s/bootstrap/config/vault-cert-syncer-rbac.yaml
 
 # 3. Crear el CronJob (tarea programada) que ejecutará los jobs cada 8 horas
-kubectl apply -f k8s/deployments/vault-cert-syncer-cronjob.yaml
+kubectl apply -f k8s/bootstrap/deployments/vault-cert-syncer-cronjob.yaml
 
 # Si revisamos la lista de configmaps y secrets, podemos
 # apreciar que aún no existe uno llamado 'vault-ca-cert'
@@ -2713,7 +3302,7 @@ Como podemos apreciar, aún no existe el `ConfigMap` y el `Secret` que necesitar
 ```sh
 # Hacemos una primera ejecución del Job para que se cree el ConfigMap y el Secret
 # en los namespaces de ESO y VSO respectivamente
-kubectl create job first-sync-vault-cert-manual \
+kubectl create job sync-vault-cert-first-manual \
   --from=cronjob/sync-vault-cert \
   -n shared-ops
 
@@ -2725,7 +3314,7 @@ kubectl get jobs -n shared-ops -o wide
 kubectl get pods -n shared-ops -o wide
 
 # Verificamos que no hayan errores en los logs
-kubectl logs -n shared-ops -l job-name=first-sync-vault-cert-manual -f --tail=50
+kubectl logs -n shared-ops -l job-name=sync-vault-cert-first-manual -f --tail=50
 
 # Validamos que en efecto ya existe el configmap y secret 'vault-ca-cert'
 kubectl get configmap -n external-secrets -o wide
@@ -2758,7 +3347,7 @@ helm repo update
 # Instalamos
 helm upgrade --install external-secrets external-secrets/external-secrets --version 2.9.0 \
   --namespace external-secrets \
-  -f k8s/deployments/eso-values.yaml
+  -f k8s/bootstrap/deployments/eso-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -2784,7 +3373,7 @@ helm repo update
 # Instalamos
 helm upgrade --install vault-secrets-operator hashicorp/vault-secrets-operator --version 1.5.1 \
    --namespace vault-secrets-operator \
-   -f k8s/deployments/vso-values.yaml
+   -f k8s/bootstrap/deployments/vso-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -2811,14 +3400,14 @@ Así pues, ejecutamos entonces los siguientes comandos:
 
 ```sh
 # Creamos la Conexión Global
-kubectl apply -f k8s/vso-vault-connection.yaml
+kubectl apply -f k8s/bootstrap/config/vso-vault-connection.yaml
 
 # Validamos que se haya creado el recurso 'vault-connection'
 # Debe quedar HEALTHY=True y READY=True
 kubectl get vaultconnections -n vault-secrets-operator -o wide
 
 # Creamos nuestro Configuración de Autenticación Global
-kubectl apply -f k8s/vso-vault-auth-global.yaml
+kubectl apply -f k8s/bootstrap/config/vso-vault-auth-global.yaml
 
 # Validamos que se haya creado el recurso 'vault-auth-global-eljavatar-k8s'
 # En este caso no vemos ningún estado, ya que un VaultAuthGlobal como tal no realiza
@@ -2830,6 +3419,1681 @@ kubectl get vaultauthglobals -n vault-secrets-operator -o wide
 # los logs del controlador de VSO para encontrar la causa del error:
 kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-controller-manager -f --tail=50
 ```
+
+
+### Argo CD (GitOps)
+
+**Argo CD** es un controlador de despliegue continuo declarativo para Kubernetes que implementa el patrón **GitOps**: el estado deseado del clúster vive en un repositorio de Git (como por ejemplo GitHub en mi caso) y un agente dentro del clúster se encarga de reconciliar permanentemente el estado real con el declarado. A diferencia de un pipeline tradicional de CI/CD, en GitOps no es el pipeline quien ejecuta `kubectl apply`, sino un agente que *observa* el repositorio y *corrige* el clúster (modelo *pull*).
+
+En este Homelab se instala ArgoCD con los CRDs gestionados por el propio chart, con una única réplica por componente (Argo CD es más pesado que los demás operadores del clúster), sin Dex ni controlador de notificaciones, expuesto a través del `external-gateway` de Cilium, y con la contraseña del usuario `admin` inyectada desde Vault en el momento de la instalación (nunca versionada en Git).
+
+#### ¿Qué es GitOps y por qué adoptarlo?
+
+En un flujo **push** clásico (Jenkins, GitHub Actions con `kubectl`), el pipeline necesita credenciales de administración del clúster y, si alguien cambia algo a mano, el clúster se "desvía" del repositorio sin que nadie lo note. En un flujo **pull** como GitOps, el clúster solo necesita permiso de lectura sobre Git y permiso de escritura dentro de sí mismo, y además es capaz de detectar y revertir el *drift* manual.
+
+| Ventaja | Detalle |
+|---------|---------|
+| **Fuente de verdad única** | Todo el estado (manifiestos, valores de Helm, versiones) vive en Git, con historial, autoría y revisión por Pull Request. |
+| **Reconciliación continua** | Si alguien edita un Deployment a mano o un Pod se queda con una configuración vieja, Argo CD vuelve a dejarlo como está en Git. |
+| **Rollback trivial** | Volver a una versión anterior = `git revert` (o el botón *Rollback* en la UI), sin re-ejecutar pipelines. |
+| **Auditoría y recuperación** | Reconstruir el Homelab tras un desastre es solo apuntar Argo CD al mismo repositorio. |
+| **Menos credenciales expuestas** | El pipeline no guarda un `kubeconfig` de administrador; solo Git necesita credenciales de lectura para Argo CD. |
+
+| Desventaja | Cómo la mitigamos en este Homelab |
+|------------|-----------------------------------|
+| **Los secretos no pueden ir en Git** | Se gestionan con Vault + VSO/ESO (el repositorio solo contiene referencias o Secret `repo-creds` generados por el operador). |
+| **Curva de aprendizaje** | Se introduce después de tener operadores, Gateway y almacenamiento funcionando a mano, que es justo el orden de este README. |
+| **Latencia de reconciliación** | `timeout.reconciliation: 120s` + `timeout.reconciliation.jitter: 60s`; suficiente para un Homelab y evita castigar el `repo-server`. |
+| **El clúster necesita acceso a Git** | Ya existe salida a internet a través de Cilium y, para casos puntuales, se podría usar un repositorio Git interno. |
+| **Puede borrar recursos** | `automated.prune` se activa por Application y de forma explícita, no de forma global en el bootstrap. |
+
+#### Limitaciones del patrón GitOps
+
+Hay que tener en cuenta que con del patrón **GitOps** la función principal es garantizar que el estado del clúster coincida con los archivos YAML del repositorio, lo cual se traduce internamente en operaciones equivalentes a `kubectl apply`, por lo que las herramientas como Argo CD que siguen este patrón no están diseñadas para ejecutar comandos imperativos (como por ejemplo `kubectl create`, `kubectl delete`, etc.).
+
+Si se requiere que este tipo de acciones también estén orquestadas por el flujo de Argo CD y sincronizadas con Git, se pueden usar patrones nativos de Kubernetes o extensiones diseñadas para tareas imperativas:
+
+- **Hooks de ciclo de vida (la vía más común):** En Argo CD existen los *Resource Hooks* (`PreSync`, `Sync`, `PostSync`) que permiten lanzar un Job (por ejemplo una migración de una base de datos) y borrarlo automáticamente al terminar usando la anotación `argocd.argproj.io/hook-delete-policy`.
+- **CronJobs bajo demanda:** Si se necesita lanzar tareas manuales de vez en cuando, se puede crear un `CronJob` en el manifiesto con `suspend: true`, y cuando haya que ejecutarlo, un operador o pipeline puede lanzar un Job a partir de él sin romper la sincronización de Git.
+- **Orquestadores de flujos (Argo Workflows / Tekton):** Si se tienen procesos complejos con múltiples pasos imperativos, lo ideal sería delegar esa ejecución a herramientas como *Argo Workflows* (que se integra de forma nativa en el ecosistema de Argo) y dejar que Argo CD se encargue de desplegar la infraestructura.
+
+#### Herramientas de GitOps más usadas en Kubernetes
+
+| Herramienta | Modelo | Fortalezas | Puntos débiles |
+|-------------|--------|------------|----------------|
+| **Argo CD** (CNCF, Graduated) | Pull, con API/UI propia | UI web excelente, `ApplicationSet`/App-of-Apps, RBAC fino, OIDC, integración natural con Argo Rollouts y Argo Workflows | Más componentes (server, controller, repo-server, Redis, ApplicationSet) y por tanto más consumo |
+| **Flux CD** (CNCF, Graduated) | Pull, "GitOps Toolkit" | Muy ligero (basado en controladores pequeños), CLI/Terraform friendly, ideal para equipos que no quieren UI | Sin UI nativa (se suele complementar con Weave GitOps (descontinuada) o Headlamp), curva inicial más alta al ser puramente CRD/CLI |
+| **Rancher Fleet** | Pull, orientado a flotas | Excelente con cientos de clústeres y despliegues multi-clúster | Pensado para Rancher/multi-clúster; sobredimensionado para un solo clúster |
+| **Spinnaker / Jenkins X** | Push/híbrido | Muy orientado a pipelines complejos multi-cloud | Pesadísimos para Homelab, mantenimiento costoso |
+
+#### ¿Por qué Argo CD es la opción ideal en este Homelab?
+
+1. **Ya usamos el ecosistema Argo:** instalamos **Argo Rollouts** ([`k8s/bootstrap/deployments/argo-rollouts-values.yaml`](k8s/bootstrap/deployments/argo-rollouts-values.yaml)), así que compartimos CRDs (`argoproj.io`), convenciones de `nodeSelector`/recursos y la CLI (`kubectl argo rollouts`). Sumar Argo CD es sumar el mismo modelo mental, no una tecnología nueva.
+2. **Es el único "operador" con interfaz propia:** para un Homelab administrado por una sola persona, ver gráficamente el árbol de aplicaciones, el estado de sincronización y el diff de un commit ahorra mucho tiempo frente a Flux (que es puramente CLI/CRD).
+3. **`ApplicationSet` resuelve el objetivo de "instalar todo lo demás sin intervención humana":** con generadores `git` (directorios) o `list`, cada nuevo componente que se agregue al repositorio se registra solo, sin escribir N objetos `Application` a mano.
+4. **Encaja con el borde del clúster:** el chart soporta `server.httproute` (Gateway API), que es exactamente lo que ya tenemos montado con Cilium y el certificado wildcard `*.eljavatar.home` de la CA interna.
+5. **SSO sin Dex:** Argo CD 3.x soporta OIDC nativo, por lo que a futuro se puede autenticar contra **Keycloak** (ya previsto en la distribución de `worker-apps-01`) desactivando el `dex-server`, que es justo lo que hicimos desde el inicio.
+6. **Métricas sin Prometheus Operator:** expone `/metrics` por componente, por lo que **VictoriaMetrics** puede hacer scraping directamente (con `metrics.enabled: true` + anotaciones `prometheus.io/*`), y **OpenObserve** puede seguir recibiendo logs/eventos sin instalar los CRDs de Prometheus.
+
+```mermaid
+flowchart LR
+    A[Repo GitOps en GitHub] --> B[Application Controller]
+    B --> C[Repo Server]
+    C --> D[Clúster Kubernetes]
+    E[Vault KV v2] --> F[VSO]
+    F --> G[Secret argocd-repo-creds]
+    G --> B
+    D --> H[external-gateway Cilium]
+    H --> I[UI argocd.eljavatar.home]
+```
+
+#### Componentes que instala el chart (y cuáles necesitamos)
+
+El chart `argo-cd` no instala una sola cosa: despliega varios controladores con responsabilidades separadas. La separación es intencional (por seguridad y por escalabilidad), y saber qué hace cada uno permite decidir qué apagar en un Homelab.
+
+| Componente | Tipo de workload | ¿Qué hace? | ¿Necesario aquí? |
+|------------|------------------|-----------|------------------|
+| `argocd-application-controller` | **StatefulSet** | Es el motor de reconciliación: compara el estado deseado (Git) con el real (clúster) y aplica/borra recursos. Usa *leader election* y soporta *sharding* (un controller por conjunto de clústeres) cuando se escala. | **Sí, imprescindible.** Una réplica. |
+| `argocd-repo-server` | **Deployment** | Clona los repositorios y ejecuta el renderizado (`helm template`, `kustomize build`, plugins CMP). Se mantiene aislado del controller porque ejecuta código de terceros (plugins, Helm charts). | **Sí, imprescindible.** Es el que más RAM puede llegar a pedir con repos grandes. |
+| `argocd-server` | **Deployment** | Sirve la **UI web**, la API REST/gRPC y es quien atiende al CLI `argocd`. | **Sí** para tener UI/CLI. Solo se podría omitir en un escenario *Argo CD Core* (headless), ahorrando ~128Mi. |
+| `argocd-applicationset-controller` | **Deployment** | Materializa `ApplicationSet` en objetos `Application` usando generadores (`list`, `git`, `cluster`, `matrix`, `pullRequest`). Es la base para el "instalar todo lo demás automáticamente". | **Sí** para nuestro objetivo de automatización futura. |
+| `argocd-redis` | **Deployment** | Caché compartida entre `server`, `controller` y `repo-server` (manifiestos generados, estado temporal). Sin Redis, los componentes no arrancan correctamente. | **Sí, imprescindible.** |
+| `argocd-redis-secret-init` | **Job** | Genera/inicializa el password de Redis (se ejecuta una sola vez por instalación). | **Sí** (es efímero, no consume recursos en régimen). |
+| `argocd-notifications-controller` | **Deployment** | Envía notificaciones de cambios/sincronizaciones a Slack, Teams, webhooks, etc. | **No por ahora** → `notifications.enabled: false`. Ahorra ~30-50Mi y un catálogo de ConfigMaps/Secrets. |
+| `argocd-dex-server` | **Deployment** | Broker de identidad (OIDC/SAML/LDAP) clásico de Argo CD. | **No por ahora** → `dex.enabled: false`. Con Keycloak se usa OIDC nativo (`configs.cm.oidc.config`) y Dex sigue sin ser necesario. |
+| `redis-ha` + `argocd-redis-ha-haproxy` | **StatefulSet/Deployment** | Redis en alta disponibilidad (Sentinel) + proxy HAProxy. | **No.** El propio chart advierte que la HA de Redis exige **al menos 3 workers** (anti-affinity obligatorio). Se reevaluará al agregar la tercera Mini PC. |
+| CRDs (`applications`, `applicationsets`, `appprojects`…) | CRDs | Definen los objetos de Argo CD. Con `crds.keep: true` sobreviven a un `helm uninstall`. | **Sí**, gestionados por el chart. |
+| `argocd-cm`, `argocd-params-cm`, `argocd-rbac-cm`, `argocd-ssh-known-hosts-cm`, `argocd-tls-certs-cm`, `argocd-gpg-keys-cm`, `argocd-secret` | ConfigMaps/Secrets | Configuración global, parámetros de los binarios, RBAC, llaves SSH de repos, certificados TLS de repos y credenciales internas. | **Sí, imprescindibles.** |
+| *(no instalados)* `argocd-image-updater`, `argocd-vault-plugin` (CMP), `Kargo` | Add-ons | Actualización automática de tags de imagen, inyección de secretos en el render, y promoción entre entornos respectivamente. | **No** en esta etapa; se pueden sumar como `Application` adicionales más adelante. |
+
+#### Decisiones de configuración para este Homelab
+
+Todas están reflejadas en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml):
+
+1. **Una sola réplica por componente:** Argo CD es, junto con el stack de observabilidad, lo más pesado del clúster. Con ~290m de CPU y ~830Mi de *requests* totales cabe holgadamente en un nodo de 11GiB, pero no justifica HA para un único operador humano.
+2. **Colocación en `worker-ops-02` (`custom-role: ops`):** Es el nodo de operaciones (cert-manager, ESO, VSO, Cilium operator, Descheduler, Reloader, Argo Rollouts dashboard). Además, VSO corre ahí y es quien generará el Secret `argocd-repo-creds` desde Vault. Al agregar la tercera Mini PC solo se cambia `global.nodeSelector` (o se descomenta `kubernetes.io/hostname`), sin tocar el resto de la configuración.
+3. **Sin `PodDisruptionBudget`:** Con `replicas: 1`, un PDB con `minAvailable: 1` bloquearía cualquier `kubectl drain`. Se añadirá cuando se pase a 2+ réplicas.
+4. **`server.insecure: true` + `server.httproute` + `server.grpcroute`:** Cilium **no** implementa `BackendTLSPolicy`, así que el patrón correcto es terminar TLS en el Gateway (certificado wildcard de la CA interna) y hablar HTTP plano dentro del clúster. El CLI `argocd` se podría usar por `kubectl port-forward` (ver troubleshooting) sin abrir gRPC al borde, pero en este caso usamos `GRPCRoute` con su propio subdominio.
+5. **Sin ServiceMonitors:** `metrics.enabled: true` (Services de métricas) + `global.addPrometheusAnnotations: true`, para que **VictoriaMetrics** haga scraping sin operador de Prometheus. OpenObserve queda para logs/eventos.
+6. **`crds.keep: true`:** Evita que un `helm uninstall` accidental destruya las CRDs y, con ellas, todas las `Application` del clúster.
+7. **Dex y notificaciones apagados:** Menos pods, menos ConfigMaps y menos superficie de ataque.
+
+#### Estructura de carpetas GitOps
+
+Los manifiestos de Argo CD viven en una carpeta propia en la raíz del proyecto (junto a `terraform/`, `k8s/`, `talos/`, `vault/`, etc.), para no mezclarlos con lo que se aplica a mano o lo que gestiona Terraform:
+
+```text
+kubernetes-homelab/
+├── gitops/
+│   ├── bootstrap/
+│   │   └── root.yaml                  # Application raíz (se aplica UNA vez)
+│   ├── projects/
+│   │   └── homelab-platform.yaml      # AppProject (fuente de verdad en Git)
+│   ├── apps/
+│   │   ├── descheduler/
+│   │   │   └── application.yaml
+│   │   ├── metrics-server/
+│   │   │   └── application.yaml
+│   │   └── open-feature-operator/
+│   │        └── application.yaml
+│   ├── appsets/
+│   │   └── platform-components.yaml   # ApplicationSet (fuente de verdad en Git)
+│   └── generated/
+│       ├── argo-rollouts/
+│       │   └── config.yaml
+│       └── reloader/
+│           └── config.yaml
+├── k8s/bootstrap/deployments/                   # values.yaml reutilizados por Terraform y por Argo CD
+├── terraform/
+└── ...
+```
+
+Usamos el nombre `gitops/` ya que es el más claro; usar `argocd/` se confundiría con los manifiestos de instalación de Argo CD (que ya están en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml)) y `gitops/argocd/` añadiría un nivel innecesario teniendo en cuenta que no tengo planeado agregar sistemas de GitOps adicionales (como por ejemplo FluxCD).
+
+Los `values.yaml` **no se duplican**: los `Application` que veremos más adelante los leen del mismo `k8s/bootstrap/deployments/` con el patrón de múltiples `sources` (`ref: values`). Si más adelante un componente pasa a ser 100 % propiedad de Argo CD, sus valores se podrían mover a `gitops/apps/<componente>/values.yaml` sin tocar nada más.
+
+#### Paso 1: Preparar las credenciales del administrador en Vault
+
+El chart espera la contraseña de `admin` en formato **bcrypt** (no texto plano) en `configs.secret.argocdServerAdminPassword`. Por eso el flujo es: se genera el hash una sola vez, se guarda en Vault, y tanto Terraform como Helm lo leen desde ahí. Al definir este valor desde el inicio, Argo CD **no** crea el `argocd-initial-admin-secret` con contraseña aleatoria y el dashboard queda usable desde el primer arranque.
+
+```sh
+# 1. Elegimos la contraseña solo en memoria (no la escribimos en ningún archivo)
+export ARGOCD_ADMIN_PASSWORD=<MY_ARGOCD_PASS>; echo $ARGOCD_ADMIN_PASSWORD
+
+# 2. Generamos el hash bcrypt en el formato exacto que espera Argo CD
+#    (htpasswd viene preinstalado en macOS; en Linux está en el paquete apache2-utils)
+export ARGOCD_ADMIN_PASSWORD_HASH="$(htpasswd -nbBC 10 '' "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/$2y/$2a/')"
+# unset ARGOCD_ADMIN_PASSWORD
+
+# 3. Guardamos el hash y su marca de tiempo en el motor KV v2 del clúster
+vault kv put secret/eljavatar_k8s/kv-v2/argocd/admin \
+  admin_password_hash="$ARGOCD_ADMIN_PASSWORD_HASH" \
+  admin_password_mtime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# 4. Verificamos (el valor aparece en 'data')
+vault kv get secret/eljavatar_k8s/kv-v2/argocd/admin
+```
+
+> **Nota:** el hash contiene caracteres `$`; si se exporta manualmente a una variable de entorno, usar comillas simples (`export ARGOCD_ADMIN_PASSWORD_HASH='$2a$10$...'`) para que el shell no intente expandirlo. Si se omite la marca de tiempo (`argocdServerAdminPasswordMtime`), Argo CD puede seguir usando la contraseña anterior hasta reiniciar el `argocd-server`.
+
+#### Paso 2: Instalar Argo CD
+
+**Opción A: vía Terraform (recomendada, no hace falta pasar el secreto por CLI)**
+
+El bloque `helm_release.argo_cd` de [`terraform/k8s-bootstrap.tf`](terraform/k8s-bootstrap.tf) lee el hash desde Vault con un `data "vault_kv_secret_v2"` y lo inyecta mediante `set_sensitive`, que además evita que el valor aparezca en los logs ni en el state legible.
+
+```sh
+# El clúster se recrea completo con los componentes ya configurados
+make tf-plan
+make tf-apply
+```
+
+**Opción B: vía Helm (instalaciones puntuales o upgrades sin recrear el clúster)**
+
+```sh
+# Agregamos el repositorio
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+
+# Leemos el hash desde Vault y lo pasamos con --set-string (nunca queda en el historial del repo)
+export ARGOCD_ADMIN_PASSWORD_HASH="$(vault kv get -field=admin_password_hash secret/eljavatar_k8s/kv-v2/argocd/admin)"
+
+# Instalamos (Chart 10.10.5 -> App v3.5.5)
+helm upgrade --install argo-cd argo/argo-cd --version 10.10.5 \
+  -n argocd --create-namespace \
+  -f k8s/bootstrap/deployments/argo-cd-values.yaml \
+  --set-string configs.secret.argocdServerAdminPassword="$ARGOCD_ADMIN_PASSWORD_HASH" \
+  --set-string configs.secret.argocdServerAdminPasswordMtime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+> **Nota:** `--set-string` es preferible a `--set` porque un hash bcrypt con `$`, `/` o `,` puede ser reinterpretado por Helm o por el shell. Si se prefiere el mismo patrón de `envsubst` que usamos en el túnel de Cloudflare y en el `ClusterIssuer`, se puede mantener aparte un archivo mínimo (**no versionado**) con solo las claves sensibles y pasarlo como segundo `-f`:
+>
+> ```yaml
+> # .argo-cd-secret-values.yaml.tpl  (ambos archivos ya están en .gitignore)
+> configs:
+>   secret:
+>     argocdServerAdminPassword: ${ARGOCD_ADMIN_PASSWORD_HASH}
+>     argocdServerAdminPasswordMtime: ${ARGOCD_ADMIN_PASSWORD_MTIME}
+> ```
+>
+> ```sh
+> # Se agregan las variables ARGOCD_ADMIN_PASSWORD_HASH y ARGOCD_ADMIN_PASSWORD_MTIME al archivo .env
+> # El .tpl se renderiza a un archivo temporal y solo se pasa como segundo '-f'
+> export $(cat .env | xargs) && envsubst < .argo-cd-secret-values.yaml.tpl > .argo-cd-secret-values.yaml
+> helm upgrade --install argo-cd argo/argo-cd --version 10.10.5 -n argocd --create-namespace \
+>   -f k8s/bootstrap/deployments/argo-cd-values.yaml -f .argo-cd-secret-values.yaml
+> ```
+
+##### Consumo de recursos y migración futura a la tercera Mini PC
+
+Argo CD instala varios componentes los cuales hay que tener en consideración, ya que si se quiere implementar el patrón de GitOps en un clúster con recursos limitados, alternativas más livianas como Flux CD podrían ser más convenientes.
+
+| Componente | Réplicas | Requests (CPU/RAM) | Limits (CPU/RAM) |
+|------------|----------|--------------------|------------------|
+| `argocd-server` | 1 | 50m / 128Mi | 500m / 512Mi |
+| `argocd-application-controller` | 1 | 100m / 256Mi | 1000m / 1Gi |
+| `argocd-repo-server` | 1 | 50m / 128Mi | 500m / 768Mi |
+| `argocd-applicationset-controller` | 1 | 20m / 64Mi | 200m / 256Mi |
+| `argocd-redis` | 1 | 20m / 64Mi | 200m / 256Mi |
+| `redis-secret-init` | Job único | 10m / 32Mi | 100m / 64Mi |
+| **Total en régimen** | | **~290m / ~830Mi** | **~3.1 vCPU / ~3.3Gi** |
+
+Cuando agregue una tercera Mini PC, podría mover Argo CD a ella solamente cambiando el `nodeSelector` global:
+
+```yaml
+global:
+  nodeSelector:
+    kubernetes.io/os: linux
+    # custom-role: "ops"                              # antes: worker-ops-02 (pmx-02)
+    custom-role: "ops-3"                              # nuevo nodo de la tercera Mini PC
+    # o fijarlo explícitamente al hostname:
+    # kubernetes.io/hostname: "worker-ops-03"
+```
+
+Después, solo sería aplicar el cambio ya sea con `helm upgrade` (con los mismos `--set-string`) o con `make tf-apply`, y Kubernetes reprogramará los pods en el nuevo nodo (con una breve ventana de indisponibilidad al ser réplica única).
+
+#### Paso 3: Validar la instalación
+
+```sh
+# 1. Pods y controladores (deben quedar Running/Ready)
+kubectl get pods -n argocd -o wide
+kubectl get statefulset,deployment -n argocd
+
+# 2. CRDs registrados por el chart
+kubectl get crds | grep argoproj.io
+
+# 3. El Secret debe contener 'admin.password' (inyectado desde Vault)
+kubectl get secret argocd-secret -n argocd -o jsonpath='{.data}' | tr ',' '\n'
+# El hash NO debe coincidir con el del argocd-initial-admin-secret (ese secreto no se creó
+# porque ya definimos la contraseña desde un inicio):
+kubectl get secret argocd-initial-admin-secret -n argocd
+
+# 4. Exposición por Gateway API (debe mostrar Accepted=True/ResolvedRefs=True y la IP 192.168.0.70)
+kubectl get httproute -n argocd
+kubectl describe httproute -n argocd argo-cd-argocd-server | tail -20
+```
+
+Para abrir la UI de forma local se debe resolver el dominio, igual que con los demás servicios expuestos por el Gateway:
+
+```sh
+# Opción A: DNS local apuntando el dominio a la IP del Gateway
+argocd.eljavatar.home 192.168.0.70
+# Luego abrir en el navegador https://argocd.eljavatar.home
+
+# Opción B: añadir la línea al archivo /etc/hosts
+echo "192.168.0.70  argocd.eljavatar.home" | sudo tee -a /etc/hosts
+# Luego abrir en el navegador https://argocd.eljavatar.home
+
+# Opción C: sin tocar DNS, port-forward directo al servicio (HTTP plano por server.insecure)
+kubectl port-forward -n argocd svc/argo-cd-argocd-server 8080:80
+# Luego abrir en el navegador http://localhost:8080
+```
+
+#### Paso 4: Acceso del CLI a través del Gateway API (gRPC)
+
+El acceso a través del navegador funciona porque la UI usa HTTP/1.1 (REST). Sin embargo, el CLI `argocd` usa **gRPC nativo (HTTP/2)**, así que sin un backend h2c el login fallaría con:
+
+```text
+rpc error: code = Unimplemented desc = unexpected HTTP status code received from server: 404 (Not Found)
+transport: received unexpected content-type "text/plain; charset=utf-8"
+data: "404 page not found\n"
+```
+
+Ese `404 page not found` es el `http.ServeMux` de Go del `argocd-server` el cual indica que la petición llega como **HTTP/1.1** a una ruta que solo existe como gRPC (`/session.SessionService/Create`).
+
+Esto se suele resolver mediante 2 pasos (los cuales ya aplicamos desde nuestro archivo de values que usamos para la instalación `k8s/bootstrap/deployments/argo-cd-values.yaml`):
+
+**1) Publicar un puerto h2c:** El chart expone un segundo puerto del Service con `appProtocol: kubernetes.io/h2c`, que es lo que Cilium usa para hablar HTTP/2 claro (h2c) con el pod:
+
+```yaml
+server:
+  service:
+    servicePortHttp: 80
+    servicePortHttps: 443
+    servicePortHttp2: 8080   # solo se renderiza con server.insecure
+    servicePortHttp2AppProtocol: kubernetes.io/h2c
+```
+
+**2) Evitar el solapamiento de rutas:** Si no segmentamos el tráfico, Cilium 1.18 traduciría la `HTTPRoute` y la `GRPCRoute` al **mismo virtualHost** de Envoy, ambas con `prefix: /`, y **la del puerto 80 quedaría primero**:
+
+```sh
+# Con este comando podemos ver la configuración del Envoy
+kubectl get ciliumenvoyconfig -n gateway-api-system cilium-gateway-external-gateway -o yaml 2>/dev/null | sed -n '150,260p'
+```
+
+Y sin un `GRPCRoute` independiente tendríamos una respuesta con datos como estos:
+
+```yaml
+# RouteConfiguration listener-secure (generado por Cilium)
+- domains: [argocd.eljavatar.home]
+  routes:
+  - match: { prefix: / }
+    route: { cluster: argocd:argo-cd-argocd-server:80 }    # HTTPRoute  -> gana siempre
+  - match: { prefix: / }
+    route: { cluster: argocd:argo-cd-argocd-server:8080 }  # GRPCRoute  -> nunca se alcanza
+```
+
+Envoy usa la **primera coincidencia**, así que el gRPC terminaría igualmente en el puerto HTTP/1.1. Por eso la `GRPCRoute` debe publicarse con **su propio hostname** (de un solo nivel, para que intersecte con el listener `*.eljavatar.home` y con el certificado wildcard):
+
+| Objeto | Hostname | Puerto del Service | Protocolo del backend | Cliente |
+|--------|----------|--------------------|-----------------------|---------|
+| `HTTPRoute` | `argocd.eljavatar.home` | `http` (80) | HTTP/1.1 | navegador |
+| `GRPCRoute` | `argocd-grpc.eljavatar.home` | `http2` (8080) | h2c | CLI `argocd` |
+
+Requisitos (ya cumplidos en este repositorio):
+
+1. `server.insecure: true` — sin esto el chart no renderiza el puerto h2c.
+2. `gatewayAPI.enableAlpn: true` y `gatewayAPI.enableAppProtocol: true` en [`k8s/bootstrap/deployments/cilium-values.yaml`](k8s/bootstrap/deployments/cilium-values.yaml:102).
+3. CRD `GRPCRoute` instalado (canal *standard* de Gateway API v1.4.1, [`standard-install.yaml`](k8s/bootstrap/gateway-api-crds/v1.4.1/standard-install.yaml:4132)).
+4. El hostname de gRPC debe resolver a la IP del Gateway: `argocd-grpc.eljavatar.home` → `192.168.0.70` (DNS local o `/etc/hosts`).
+
+Configuración aplicada en [`k8s/bootstrap/deployments/argo-cd-values.yaml`](k8s/bootstrap/deployments/argo-cd-values.yaml):
+
+```yaml
+server:
+  httproute:
+    enabled: true
+    parentRefs:
+      - name: external-gateway
+        namespace: gateway-api-system
+        sectionName: https-local
+    hostnames:
+      - "argocd.eljavatar.home"
+  grpcroute:
+    enabled: true
+    parentRefs:
+      - name: external-gateway
+        namespace: gateway-api-system
+        sectionName: https-local
+    hostnames:
+      # Subdominio de UN nivel: *.eljavatar.home no cubre dos niveles
+      - "argocd-grpc.eljavatar.home"
+    rules:
+      - {}    # todo el tráfico gRPC de ese hostname hacia el puerto h2c
+```
+
+De ese modo, al validar:
+
+```sh
+kubectl get ciliumenvoyconfig -n gateway-api-system cilium-gateway-external-gateway -o yaml 2>/dev/null | grep -nE "^    - domains:|argocd-grpc|argocd.eljavatar.home|cluster: argocd:" | sed -n '1,30p'
+```
+
+Tendríamos una salida como esta donde podemos apreciar que cada puerto se enruta por dominios diferentes:
+
+```text
+191:    - domains:
+203:    - domains:
+204:      - argocd-grpc.eljavatar.home
+205:      - argocd-grpc.eljavatar.home:*
+206:      name: argocd-grpc.eljavatar.home
+211:          cluster: argocd:argo-cd-argocd-server:8080
+214:    - domains:
+215:      - argocd.eljavatar.home
+216:      - argocd.eljavatar.home:*
+217:      name: argocd.eljavatar.home
+222:          cluster: argocd:argo-cd-argocd-server:80
+225:    - domains:
+```
+
+Para usarlo desde el CLI:
+
+```sh
+# Registrar el hostname (una vez) (o mediante un servidor DNS local)
+echo "192.168.0.70  argocd-grpc.eljavatar.home" | sudo tee -a /etc/hosts
+
+# Login usando el hostname de gRPC (el de la UI seguirá sirviendo el navegador)
+argocd login argocd-grpc.eljavatar.home --username admin --password "$ARGOCD_ADMIN_PASSWORD" --insecure
+
+# A partir de aquí, el servidor guardado en la config del CLI es el de gRPC
+argocd app list
+argocd version
+
+# Para cerrar sesión en la CLI
+argocd logout argocd-grpc.eljavatar.home --insecure
+```
+
+Verificación:
+
+```sh
+# 1. El Service debe tener tres puertos: http(80), http2(8080 h2c) y https(443)
+kubectl get svc -n argocd argo-cd-argocd-server \
+  -o jsonpath='{range .spec.ports[*]}{.name}{" -> "}{.port}{" appProtocol="}{.appProtocol}{"\n"}{end}'
+
+# 2. Deben existir dos virtualHosts: uno al puerto 80 y otro al 8080
+kubectl get ciliumenvoyconfig -n gateway-api-system cilium-gateway-external-gateway -o yaml \
+  | grep -nE "domains:|hostname|cluster: argocd:" | head -20
+
+# 3. Prueba de transporte gRPC (200 = llegó al servidor gRPC; 404 = sigue cayendo en el puerto 80)
+curl -sk --http2 --resolve argocd-grpc.eljavatar.home:443:192.168.0.70 \
+  -o /dev/null -w '%{http_code} http=%{http_version}\n' \
+  -X POST https://argocd-grpc.eljavatar.home/session.SessionService/Create \
+  -H 'Content-Type: application/grpc' -H 'TE: trailers' --data-binary ''
+
+# 4. La UI debe seguir respondiendo por su propio hostname
+curl -sk -o /dev/null -w '%{http_code}\n' https://argocd.eljavatar.home/
+```
+
+> **Errores frecuentes:**
+> 1. Usar la anotación `io.cilium/app-protocol`: Cilium lee `appProtocol` del **puerto**, no esa anotación.
+> 2. `servicePortHttp2AppProtocol: "http"` (eso declara HTTP/1.1).
+> 3. Declarar `servicePortHttpsAppProtocol: kubernetes.io/h2c` sin `servicePortHttp2`: no se crea ningún puerto h2c.
+> 4. Reutilizar el hostname de la UI en la `GRPCRoute`: la `HTTPRoute` catch-all lo eclipsa (caso visto anteriormente).
+> 5. Usar un hostname de **dos** niveles (`grpc.argocd.eljavatar.home`): no intersecta con el listener `*.eljavatar.home` ni con el certificado, y la `GRPCRoute` no se adjunta.
+> 6. `--grpc-web`: **no sirve en Argo CD 3.x**, ya que el servidor no expone esa ruta por HTTP/1.1 (devuelve el mismo 404 incluso contra el pod).
+
+**Alternativa local recomendada: `--core`**
+
+El CLI puede hablar directamente con la API de Kubernetes usando el `kubeconfig`, sin pasar por el Gateway. En modo `--core` el CLI busca el ConfigMap `argocd-cm` en el **namespace del contexto actual**, así que hay que apuntarlo a `argocd` (o usar un contexto específico):
+
+```sh
+# Apuntar el contexto al namespace de Argo CD (o usar --kube-context)
+kubectl config set-context --current --namespace=argocd
+
+argocd login --core
+argocd app list
+
+# Restaurar el namespace por defecto si se desea
+kubectl config set-context --current --namespace=default
+```
+
+> `kubectl port-forward` también funciona en teoría, pero en macOS puede fallar con `read: connection reset by peer` por el manejo de conexiones HTTP/2 sobre SPDY. Si se usa, apuntar a `127.0.0.1` (no `localhost`, que podría resolverse a `::1`):
+>
+> ```sh
+> kubectl port-forward -n argocd svc/argo-cd-argocd-server 8080:8080
+> argocd login 127.0.0.1:8080 --plaintext --username admin --password "$ARGOCD_ADMIN_PASSWORD"
+> ```
+
+#### Paso 5: Configurar repositorios y proyectos de GitHub
+
+> **NOTA:** **Si el clúster se configuró con Terraform (`auto_config_cluster=true`), NO hay que ejecutar los comandos `kubectl apply`** que estaremos viendo en este paso, debido a que los recursos `kubectl_manifest.argocd_project_homelab_platform`, `kubectl_manifest.argocd_root_application` y `kubectl_manifest.argocd_appset_platform_components` de [`terraform/k8s-bootstrap.tf`](terraform/k8s-bootstrap.tf) ya realizan dicha ejecución. La vía manual es para clústeres con `auto_config_cluster=false` o para iterar sin pasar por Terraform, ya que si se aplican a mano sobre un clúster gestionado por Terraform, el siguiente `terraform apply` reconciliaría los objetos a su estado declarado.
+
+Argo CD necesita dos piezas distintas: **credenciales** para clonar repositorios y **proyectos** (`AppProject`) que delimitan qué puede desplegar cada `Application`.
+
+##### Credenciales
+
+> **Importante:** `https://github.com/eljavatar/kubernetes-homelab` es **público**, así que Argo CD clona de forma anónima y **no requiere credenciales**. Las dos opciones siguientes quedan documentadas como preparación para el día en que el repositorio pase a privado.
+
+**¿Qué es un PAT y qué va en `username`/`password`?** Un *Personal Access Token* es un token que se genera en GitHub (*Settings → Developer settings → Personal access tokens*) y que **sustituye a la contraseña** para operaciones Git por HTTPS (GitHub ya no acepta contraseñas de cuenta). Lo recomendable es un token **fine-grained** limitado al repositorio (en este caso, `kubernetes-homelab`) con permiso **Contents: Read-only**, guardado en Vault y rotado periódicamente. En el par `username`/`password` de Argo CD: `password` es el **PAT** y `username` es **irrelevante para GitHub** (se suele usar `git`, pero sirve cualquier valor no vacío; no es el usuario de GitHub ni una llave SSH).
+
+| Método de autenticación | Claves del Secret de Argo CD | Cuándo usarlo |
+|-------------------------|------------------------------|---------------|
+| **PAT fine-grained** | `type: git`, `url`, `username`, `password` (el PAT) | Pocos repositorios; se rota fácil y vive en Vault |
+| **GitHub App** | `type: git`, `url`, `githubAppID`, `githubAppInstallationID`, `githubAppPrivateKey` | Organización con varios repositorios; no caduca como un PAT |
+| **SSH deploy key** | `type: git`, `url: git@github.com:...`, `sshPrivateKey` | Si se prefiere no usar tokens; la llave pública se registra como *Deploy key* en el repo |
+
+###### Opción A: desde el `values.yaml` (solo para el bootstrap, NO para Git)
+
+La clave `configs.repositories` crea un Secret por repositorio y `configs.credentialTemplates` permite credenciales reutilizables por prefijo de URL (por ejemplo, toda la organización). `${GITHUB_PAT}` es un **marcador** que se inyecta con `--set-string` o `envsubst`; nunca es un valor literal en el archivo:
+
+```yaml
+# Estructura soportada por el chart (las credenciales se inyectan con --set-string/envsubst,
+# NUNCA se commitean en Git). Mientras el repositorio sea público, este bloque no es necesario.
+configs:
+  repositories:
+    homelab-gitops:
+      url: https://github.com/eljavatar/kubernetes-homelab
+      type: git
+      username: git          # irrelevante para GitHub cuando se usa un PAT
+      password: "${GITHUB_PAT}"
+  credentialTemplates:
+    github-eljavatar:
+      url: https://github.com/eljavatar
+      type: git
+      username: git
+      password: "${GITHUB_PAT}"
+```
+
+###### Opción B: `repo-creds` gestionado por VSO (recomendada)
+
+> **Nota:** Esta es la opción recomendada, pero con matices, ya que requiere que VSO exista antes de instalar Argo CD (tal como se hace en este Homelab), pero en caso de que se pretenda instalar VSO (o el operador de preferencia para manejo de secretos) mediante Argo CD, se crearía un problema de dependencia circular que veremos cómo abordar más adelante en la subsección [Repositorio privado: la cadena de confianza (problema del huevo o la gallina)](#repositorio-privado-la-cadena-de-confianza-problema-del-huevo-o-la-gallina).
+
+Se guardan las credenciales en Vault y VSO genera un Secret etiquetado, que Argo CD interpreta como credencial de repositorio *sin* que nadie escriba el token en Git:
+
+```sh
+# Las claves del secreto deben tener exactamente estos nombres
+vault kv put secret/eljavatar_k8s/kv-v2/argocd/github \
+  url="https://github.com/eljavatar" \
+  type="git" \
+  username="git" \
+  password="$GITHUB_PAT"   # fine-grained PAT con Contents: Read-only
+```
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-vso-auth-sa
+  namespace: argocd
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: vault-auth-argocd
+  namespace: argocd
+spec:
+  vaultAuthGlobalRef:
+    name: vault-auth-global-eljavatar-k8s
+    namespace: vault-secrets-operator
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: argocd-repo-creds
+  namespace: argocd
+spec:
+  vaultAuthRef: vault-auth-argocd      # VaultAuth del namespace argocd
+  mount: "secret/eljavatar_k8s/kv-v2"
+  type: kv-v2
+  path: "argocd/github"
+  refreshAfter: 300s
+  destination:
+    create: true        # 'labels' y 'annotations' solo se aplican si create es true
+    overwrite: true     # necesario si el Secret ya existe (por ejemplo, creado a mano antes)
+    name: argocd-repo-creds
+    type: Opaque
+    labels:
+      argocd.argoproj.io/secret-type: repo-creds
+    # Si la versión de VSO (o ESO) no soporta 'labels' en destination, etiquetar después:
+    # kubectl label secret argocd-repo-creds -n argocd argocd.argoproj.io/secret-type=repo-creds --overwrite
+```
+
+> **Nota:** la etiqueta `argocd.argoproj.io/secret-type: repo-creds` es la que le dice a Argo CD que ese Secret contiene credenciales *reutilizables por URL*. Para un repositorio individual se usaría `secret-type: repository` y se añadirían las claves `url`, `type`, `username` y `password` del repo concreto.
+
+> **Sobre la rotación:** con `refreshAfter: 300s`, si se cambia el PAT en Vault, VSO reescribe el Secret en menos de cinco minutos y Argo CD recarga las credenciales de repositorio sin reiniciar el `repo-server`. El `labels` de `destination` está soportado por la API de VSO y **exige `create: true`**; si por alguna razón no se aplicara la etiqueta, el comando comentado de `kubectl label ... --overwrite` sirve como respaldo.
+
+**¿Cómo consume Argo CD el Secret `repo-creds`?**
+
+El Secret `argocd-repo-creds` **no se referencia desde ninguna `Application`**: Argo CD lo descubre por sí mismo porque está en su propio namespace (`argocd`) y lleva la etiqueta `argocd.argoproj.io/secret-type: repo-creds`. Ese objeto es una **plantilla de credenciales** que se aplica por **prefijo de URL**: cualquier repositorio cuya URL empiece por el `url` del Secret usará esas credenciales (la documentación indica que gana la coincidencia más larga).
+
+Con `url: https://github.com/eljavatar`, el token sirve para `kubernetes-homelab` y para cualquier repositorio futuro del mismo dueño, sin tocar los `Application`.
+
+```sh
+# Verificar que el Secret existe, está en el namespace correcto y tiene la etiqueta
+kubectl get secret -n argocd -l argocd.argoproj.io/secret-type=repo-creds
+kubectl get secret -n argocd argocd-repo-creds -o jsonpath='{.metadata.labels}'; echo
+
+# Comprobar que Argo CD ya lo ve como plantilla de credenciales
+argocd repocreds list
+# En la UI: Settings -> Repositories (aparece como 'credential template')
+
+# Forzar un refresco tras rotar el PAT en Vault (Opcional)
+kubectl annotate secret -n argocd argocd-repo-creds argocd.argoproj.io/refresh=normal --overwrite
+```
+
+| Etiqueta | Alcance | Claves en el Secret |
+|----------|---------|---------------------|
+| `secret-type: repo-creds` | Todos los repos cuyo URL empiece por `url` | `url`, `type`, `username`/`password` (o `githubApp*`, o `sshPrivateKey`) |
+| `secret-type: repository` | Un único repositorio (URL exacta) | `url`, `type`, más credenciales o `project` |
+
+###### Repositorio privado: la cadena de confianza (problema del huevo o la gallina)
+
+> **NOTA:** En este Homelab no se presenta este problema ya que el repositorio es público, y además, no se pretende gestionar la instalación de VSO/ESO mediante Argo CD; sin embargo, lo dejo documentado ya que es un problema más normal de lo que parece.
+
+Cuando el repositorio no es público aparece un círculo: **Argo CD necesita credenciales de Git para instalarse, y la opción "recomendada" ([que VSO genere el Secret desde Vault](#opción-b-repo-creds-gestionado-por-vso-recomendada)) requiere que VSO ya exista**, pero si se pretende instalar VSO con Argo CD se daría lugar al problema del "huevo o la gallina", ya que Argo CD no se podría instalar sin las credenciales que proporcionaría VSO (lo cual requiere que VSO esté instalado), y VSO no se podría instalar si no se instala primero Argo CD.
+
+Por lo tanto, para resolver este problema de dependencia circular, la cadena real debería ser la siguiente (muestro el ejemplo de pasos que se deberían seguir desde Terraform, pero en caso de ser ejecución manual, los pasos serían los mismos):
+
+```text
+Terraform (ya tiene token de Vault)
+ ├─ crea el token reviewer y lo escribe en Vault         (identidad)
+ ├─ lee de Vault la credencial de Git y crea el Secret   (repo-creds / repository)
+ │     └─ Argo CD clona el repositorio y aplica root/ApplicationSet
+ │           └─ se instalan ESO/VSO
+ │                 └─ desde aquí VSO sí puede gestionar los secretos de las apps
+```
+
+**Regla:** la credencial de Git **no puede depender de VSO**; se crea en el bootstrap, leyendo el valor desde Vault con Terraform (o con `kubectl apply` si se hace manual). Una vez que VSO está sano, se puede delegar (fase 2) ese mismo Secret a VSO sin romper nada.
+
+| Método | Claves del Secret de Argo CD | Ventaja |
+|--------|------------------------------|---------|
+| **Deploy key SSH (solo lectura)** ⭐ | `type: git`, `url: git@github.com:...`, `sshPrivateKey` | Permiso mínimo, por repositorio, revocable sin tocar la cuenta; no da escritura |
+| **PAT fine-grained** | `type: git`, `url`, `username`, `password` | Sencillo de rotar; limitar a `Contents: Read-only` |
+| **GitHub App** | `type: git`, `url`, `githubAppID`, `githubAppInstallationID`, `githubAppPrivateKey` | Ideal para varios repos de una organización; no caduca como un PAT |
+
+Ejemplo de creación en el bootstrap, leyendo la deploy key desde Vault (esta sería la forma de hacerlo mediante Terraform, pero como lo mencioné, también podría hacerse de forma manual con `kubectl apply`):
+
+```hcl
+# La clave privada vive en Vault; Terraform la lee y crea el Secret que usa Argo CD
+data "vault_kv_secret_v2" "argocd_repo" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  mount = "secret/eljavatar_k8s/kv-v2"
+  name  = "argocd/github"
+}
+
+resource "kubernetes_secret_v1" "argocd_repo_creds" {
+  count = var.auto_config_cluster ? 1 : 0
+
+  metadata {
+    name      = "argocd-repo-creds"
+    namespace = "argocd"
+    labels = {
+      "argocd.argoproj.io/secret-type" = "repo-creds"
+    }
+  }
+
+  type = "Opaque"
+  data = {
+    url            = "https://github.com/eljavatar"
+    type           = "git"
+    username       = "git"
+    password       = data.vault_kv_secret_v2.argocd_repo[0].data["github_pat"]
+    # O con SSH: quitar username/password y usar
+    # sshPrivateKey = data.vault_kv_secret_v2.argocd_repo[0].data["ssh_private_key"]
+  }
+
+  depends_on = [helm_release.argo_cd]
+}
+```
+
+> Con `secret-type: repo-creds` y `url` como prefijo de organización, el Secret sirve para **todos** los repos de `github.com/eljavatar`. Si se prefiere limitarlo a un repo, usar `secret-type: repository` con la URL exacta.
+>
+> Un `VaultStaticSecret` que genere este mismo Secret **solo** tiene sentido como fase 2 (cuando VSO ya está instalado (ya sea por Terraform o por Argo CD) y funcionando): en el bootstrap sería circular.
+
+##### Proyectos (`AppProject`)
+
+A diferencia de las credenciales, un `AppProject` **no es un secreto**: se versiona en Git y se aplica como cualquier otro recurso. Delimita repositorios permitidos, clústeres/destinos y tipos de recursos. El archivo vive en [`gitops/projects/homelab-platform.yaml`](gitops/projects/homelab-platform.yaml):
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: homelab-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Componentes de plataforma del Homelab
+  sourceRepos:
+    - https://github.com/eljavatar/kubernetes-homelab
+    # Los repositorios de charts TAMBIÉN son "sources" y deben autorizarse aquí
+    - https://argoproj.github.io/argo-helm
+    - https://stakater.github.io/stakater-charts
+    - https://kubernetes-sigs.github.io/descheduler/
+    - https://kubernetes-sigs.github.io/metrics-server/
+    - https://open-feature.github.io/open-feature-operator
+    - https://charts.jetstack.io
+    - https://openebs.github.io/openebs
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+  # Recursos de ámbito de clúster necesarios (CRDs, ClusterIssuer, StorageClass, etc.)
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+```
+
+> **Error típico:** si un `Application` (que veremos en las siguientes secciones) usa el patrón de múltiples `sources` (chart de Helm + `valueFiles` del repositorio) y el repositorio del chart no está en `sourceRepos`, la Application queda en `InvalidSpecError` con el mensaje *"application repo ... is not permitted in project"*. Si no se quiere mantener la lista a mano, se puede usar el comodín `"*"`, a costa de perder el aislamiento del proyecto.
+
+El proyecto debe existir antes que las Applications que lo referencian, para lo cual aplicamos el siguiente manifiesto:
+
+```sh
+kubectl apply -f gitops/projects/homelab-platform.yaml
+```
+
+> **¿Quién es el dueño del `AppProject`?** En el caso de este Homelab es Terraform a través del recurso `kubectl_manifest.argocd_project_homelab_platform` el cual aplica el manifiesto [`gitops/projects/homelab-platform.yaml`](gitops/projects/homelab-platform.yaml). Por eso **agregar un `sourceRepo` no se propaga con un commit**: la raíz (`gitops/bootstrap/root.yaml`) sincroniza solo `gitops/apps` (con `include: '*/application.yaml'`), no `gitops/projects`.
+>
+> Por lo tanto, si se agregan repositorios a la lista `sourceRepo` del `AppProject`, para que estos cambios se reflejen en ArgoCD tenemos las siguientes alternativas:
+>
+> | Vía | Cuándo usarla | Efecto |
+> |-----|---------------|--------|
+> | `make tf-apply` | Vía normal, Terraform es el dueño | Reaplica el YAML y mantiene el estado |
+> | `kubectl apply -f gitops/projects/homelab-platform.yaml` | Cambio urgente sin pasar por Terraform | Aplica, pero el siguiente `terraform apply` lo reconcilia |
+> | Delegar en Argo CD | **Evolución:** `gitops/apps/projects/application.yaml` + eliminar el `kubectl_manifest` de Terraform (`terraform -chdir=terraform state rm kubectl_manifest.argocd_project_homelab_platform` -> borrado del bloque de código -> `make tf-apply`) | Un solo dueño; se actualiza con commit + sync |
+
+#### Paso 6: Bootstrap: App-of-Apps
+
+La App-of-Apps será [`gitops/bootstrap/root.yaml`](gitops/bootstrap/root.yaml), el cual sincroniza todo lo que esté dentro de `gitops/apps` de forma recursiva y solo aplica los archivos llamados `application.yaml`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: homelab-platform
+  source:
+    repoURL: https://github.com/eljavatar/kubernetes-homelab
+    targetRevision: main
+    path: gitops/apps
+    directory:
+      recurse: true                 # entra en gitops/apps/<componente>/
+      include: '*/application.yaml' # ignora cualquier archivo que no se llame application.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+> **El `source.path` de la raíz debe existir en el commit remoto:** Argo CD clona desde GitHub y valida la ruta: mientras `gitops/apps` no esté versionado (Git no guarda directorios vacíos) la Application muestra `ComparisonError: ... gitops/apps: app path does not exist`. Para preparar la estructura sin subir ningún otro componente al repositorio remoto haríamos lo siguiente:
+>
+> ```sh
+> touch gitops/apps/.gitkeep
+> git add gitops/apps/.gitkeep && git commit -m "chore(gitops): crear estructura gitops/apps" && git push
+> argocd app sync root   # ahora sincroniza con 0 recursos
+> ```
+
+Cada componente se declara con su propio `application.yaml`. A continuación vemos un ejemplo real para **Descheduler**, mostrando el patrón de múltiples `sources` (chart de Helm + valores del repositorio) y el correspondiente `destination.namespace` donde se instalaría:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: descheduler
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  project: homelab-platform
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/descheduler/
+      chart: descheduler
+      targetRevision: 0.36.0
+      helm:
+        releaseName: descheduler
+        valueFiles:
+          - $values/k8s/bootstrap/deployments/descheduler-values.yaml
+    - repoURL: https://github.com/eljavatar/kubernetes-homelab
+      targetRevision: main
+      ref: values          # 'ref' no puede combinarse con 'chart' en la misma source
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+Para crear las `Application`, aplicamos **una sola vez** el manifiesto de la raíz, y de ahí en adelante Argo CD se auto-gestiona desde Git:
+
+```sh
+# 1. La Application raíz
+kubectl apply -f gitops/bootstrap/root.yaml
+
+# 2. Primera sincronización (el root arranca en modo manual;
+#    requiere que ya se haya hecho previamente commit/push).
+#    Más adelante en la sección "Probar el levantamiento completo con una
+#    rama `test/<tema>`" veremos cómo hacer pruebas con una rama alterna
+#    sin llenar la rama principal de "commits basura" de pruebas.
+argocd app sync root
+```
+
+Los otros componentes siguen exactamente la misma forma, cambiando chart, versión y namespace (a continuación listo 3 componentes de ejemplo, pero la lógica sería la misma para cualquier otro servicio o aplicación):
+
+| Application | Chart y versión | `destination.namespace` |
+|-------------|-----------------|-------------------------|
+| `gitops/apps/descheduler/application.yaml` | `descheduler` 0.36.0 | `kube-system` |
+| `gitops/apps/metrics-server/application.yaml` | `metrics-server` 3.13.1 | `kube-system` |
+| `gitops/apps/open-feature-operator/application.yaml` | `open-feature-operator` 0.9.3 | `open-feature-operator-system` |
+
+> **`destination.namespace` no es el namespace de Argo CD:** El namespace donde vive la `Application` es su `metadata.namespace` (`argocd`); `destination.namespace` es el namespace destino del release de Helm y el namespace por defecto de los recursos que no traigan `metadata.namespace`. `destination.server: https://kubernetes.default.svc` es el API server del propio clúster donde corre Argo CD (equivalente a `destination.name: in-cluster`); solo cambia si se registran clústeres externos.
+
+> **Sobre `targetRevision`:** `main` fija esa rama; `HEAD` sigue la **rama por defecto** del remoto (sobrevive a un renombrado de rama). Ambos hacen *branch tracking* y se reconcilian con cada commit nuevo. Para reproducibilidad estricta se usa un **tag** o un **commit SHA**.
+
+#### Paso 7: Variante escalable: `ApplicationSet` con generador `files`
+
+Cuando el número de componentes crece, escribir un `application.yaml` por cada uno se vuelve repetitivo. En ese caso cada carpeta lleva un `config.yaml` con sus metadatos (incluido el namespace, que es lo que evita el error de usar el nombre de la carpeta como namespace):
+
+```yaml
+# gitops/generated/reloader/config.yaml
+name: reloader
+namespace: reloader
+chartRepo: https://stakater.github.io/stakater-charts
+chart: reloader
+chartVersion: 2.2.17
+valuesFile: k8s/bootstrap/deployments/reloader-values.yaml
+syncWave: "40"
+```
+
+```yaml
+# gitops/appsets/platform-components.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-components
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/eljavatar/kubernetes-homelab
+        revision: main
+        files:
+          - path: gitops/generated/*/config.yaml
+  template:
+    metadata:
+      name: '{{ .name }}'
+      namespace: argocd
+      annotations:
+        argocd.argoproj.io/sync-wave: '{{ .syncWave }}'
+    spec:
+      project: homelab-platform
+      sources:
+        - repoURL: '{{ .chartRepo }}'
+          chart: '{{ .chart }}'
+          targetRevision: '{{ .chartVersion }}'
+          helm:
+            releaseName: '{{ .name }}'
+            valueFiles:
+              - '$values/{{ .valuesFile }}'
+        - repoURL: https://github.com/eljavatar/kubernetes-homelab
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ .namespace }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+
+Parámetros que expone un generador `git` cuando se usa `goTemplate: true` (aunnque en este caso no los usaremos por el momento):
+
+| Parámetro | Significado | Ejemplo |
+|-----------|-------------|---------|
+| `{{ .path.path }}` | Ruta relativa completa de la carpeta descubierta | `gitops/generated/descheduler` |
+| `{{ .path.basename }}` | Último segmento de esa ruta | `descheduler` |
+| `{{ index .path.segments n }}` | Segmento por índice (útil con la convención `apps/<namespace>/<app>`) | `index .path.segments 2` → `descheduler` |
+| `{{ .path.basenameNormalized }}` | Igual que `basename`, con caracteres no válidos reemplazados por `-` | `open-feature-operator` |
+
+> **Sobre los dos tipos de `path`:** en una `Application`, `spec.source.path` es la **carpeta concreta** que se sincroniza. En un generador `git` de `ApplicationSet`, `path:` es un **glob de descubrimiento** de subcarpetas. Son cosas distintas y por eso no necesariamente tienen que coincidir.
+
+Con `applicationsetcontroller.enable.progressive.syncs: true` (ya activado en el values), un `ApplicationSet` puede respetar el orden de `sync waves` y esperar a que una aplicación esté `Healthy` antes de aplicar la siguiente, lo que permite instalar por fases (primero operadores, luego aplicaciones de negocio).
+
+##### ¿Dónde vive cada `ApplicationSet` y cómo convive con el App-of-Apps?
+
+El `ApplicationSet` va en `gitops/appsets/`, **no** en `gitops/apps/`, porque la `Application` raíz (`gitops/bootstrap/root.yaml`) sincroniza esa carpeta con `include: '*/application.yaml'` y lo ignoraría. Al igual que el proyecto y el root, se aplicaría una sola vez:
+
+```sh
+kubectl apply -f gitops/appsets/platform-components.yaml
+# El controller del ApplicationSet genera las Applications solo, en el siguiente
+# ciclo (≤3 min con el timeout.reconciliation: 120s). Para forzarlo (el commit
+# debe estar ya en el repositorio remoto para que funcione):
+kubectl annotate appset -n argocd platform-components argocd.argoproj.io/refresh=normal --overwrite
+
+# Adicionalmente, podemos ver la lista de apps que generaría un ApplicationSet
+argocd appset generate gitops/appsets/platform-components.yaml
+# También podríamos ver el yaml que generaría:
+argocd appset generate gitops/appsets/platform-components.yaml -o yaml
+```
+
+Se pueden tener **varios `ApplicationSet`**; lo que los distingue es lo que seleccionan sus generadores:
+
+| Mecanismo de separación | Ejemplo |
+|-------------------------|---------|
+| Globs de rutas disjuntas | `platform-components` → `gitops/generated/platform/*`; `tenant-apps` → `gitops/generated/tenants/*` |
+| Patrón de archivos | `gitops/generated/platform/*/config.yaml` |
+| Etiqueta en las Applications generadas | `template.metadata.labels.appset: platform-components` |
+| Repositorio distinto | un set por `repoURL` (patrón multi-repo) |
+
+```sh
+# En caso de tener varios, podemos saber qué set generó cada Application
+argocd app list -l appset=platform-components
+kubectl get applications -n argocd -l appset=tenant-apps
+```
+
+##### Reglas para mezclar `ApplicationSet` con el Apps-of-Apps
+
+Es perfectamente válido tener **ambos mecanismos al mismo tiempo**, sin embargo, para mezclar Applications escritas a mano (Apps-of-Apps) con Applications generadas (`ApplicationSet`) se deben respetar las siguientes reglas:
+
+1. **Un directorio, un dueño:** Un `ApplicationSet` y el App-of-Apps producen los mismos objetos (`Application` en el namespace `argocd`), por lo tanto, si el generador descubre una carpeta con su respectivo `config.yaml` pero que además tiene un `application.yaml`, habrá dos Applications peleando por los mismos recursos, así que hay que asegurarse que cada `Application` sea creado únicamente por un solo mecanismo.
+2. **Carpetas separadas:** `gitops/apps/` para las manuales (las sincroniza el root) y `gitops/generated/` para las que descubre el generador; ningún componente debe estar en `gitops/apps` (root) y en `gitops/generated` (ApplicationSet) a la vez.
+3. **Exclusiones:** en el generador, por ejemplo `- path: gitops/generated/experimental` con `exclude: true`.
+
+En la siguiente tabla veremos algunas consideraciones a tener en cuenta para saber en qué escenarios conviene usar uno u otro (también pueden servir para decidir si conviene unificar todo en un `ApplicationSet` o mantener la combinación de App-of-Apps y `ApplicationSet`):
+
+| Criterio | App-of-Apps (`root` + `application.yaml`) | `ApplicationSet` |
+|----------|-------------------------------------------|------------------|
+| Componente = chart + values + namespace | Funciona, pero se repiten YAMLs por componente | **Ideal**: una plantilla + un `config.yaml` por componente |
+| Componente con varios manifiestos, Kustomize, hooks o CRs propios | **Ideal**: `source.path` apunta a una carpeta | Forzado/incómodo |
+| Orden entre componentes | Waves de creación de los CRs; **no** espera `Healthy` | `RollingSync` con steps y gates de salud |
+| Escala (muchos componentes homogéneos) | Muchos archivos que mantener | **Escala mejor** |
+| Curva de aprendizaje | Baja | Media (generadores, plantillas, labels) |
+| Visibilidad | Un `Application` por componente en Git | El componente se define en `config.yaml`, la plantilla es única |
+
+**Recomendación de evolución:** inicialmente se pueden mantener ambos (root para componentes con estructura propia, ApplicationSet para los homogéneos). Cuando la mayoría sean "chart + values", unificar en el `ApplicationSet` con `RollingSync` y dejar `root` solo para los casos particulares.
+
+#### Bootstrap desde Terraform
+
+Los comandos `kubectl apply` que vimos previamente nos sirven para configurar manualmente las aplicaciones que queremos sean gestionadas por Argo CD, sin embargo, como mencioné también, todo este proceso se realiza automáticamente desde Terraform al ejecutar `make tf-apply` con el flag `AUTO_CONFIG_CLUSTER=true`, así que es importante saber qué es lo que estaría haciendo Terraform tras bambalinas.
+
+Terraform instala Argo CD y **solo** los objetos de bootstrap (el `AppProject` (*homelab-platform*), el `App-of-Apps` (*root*) y el `ApplicationSet` (*platform-components*)); a partir de ahí Argo CD se auto-gestiona:
+
+```sh
+# Verificar el orden que aplica Terraform
+terraform -chdir=terraform plan | grep -E "kubectl_manifest.argocd_|helm_release.argo_cd"
+```
+
+```mermaid
+flowchart TD
+    A[terraform apply] --> B[helm_release argo_cd]
+    B --> C[kubectl_manifest AppProject homelab_platform]
+    C --> D[kubectl_manifest Application root]
+    D --> E[kubectl_manifest ApplicationSet platform_components]
+    E --> F[Application controller lee gitops/apps y gitops/generated]
+    F --> G[crea Applications hijas]
+    G --> H[sync de cada chart si automated esta activo]
+    H --> I[Descheduler, Metrics Server, OpenFeature, etc.]
+```
+
+En caso de que se desee migrar de forma segura un componente gestionado por Terraform a Argo CD (sin downtime), se haría de la siguiente forma (ejemplo con descheduler, aunque ya lo estamos gestionando con ArgoCD):
+
+```sh
+# 1. Terraform "olvida" el release (NO lo destruye)
+terraform -chdir=terraform state rm helm_release.descheduler
+
+# 2. Eliminar el bloque 'helm_release' correspondiente de terraform/k8s-bootstrap.tf
+
+# 3. Sincronizar la Application: Argo CD adopta los objetos que ya existen en el clúster
+argocd app sync descheduler
+argocd app get descheduler
+```
+
+#### Equivalencia con `depends_on` de Terraform: cómo esperar dependencias en Argo CD
+
+Primero una precisión importante: **`depends_on` de Terraform no espera a que los pods estén `Healthy`**; solo garantiza el orden en el grafo de creación. La espera real la produce la propiedad `wait = true` (y `wait_for_jobs = true`) del `helm_release`, que es una características **del provider de Helm**, no del `depends_on`. Con Argo CD no existe un `depends_on` entre `Application`; los mecanismos disponibles son:
+
+| Mecanismo | Qué garantiza | Alcance |
+|-----------|---------------|---------|
+| **Sync waves** (`argocd.argoproj.io/sync-wave` en los manifiestos) | Orden de **aplicación de recursos** dentro de una `Application`; espera a que la wave anterior se aplique y a que los **hooks** terminen | Intra-Application. **No** espera `Healthy` de recursos normales |
+| **`RollingSync`** (en el `ApplicationSet`) | Espera `Healthy` de cada step antes de pasar al siguiente | Entre `Application` del **mismo** `ApplicationSet` |
+| **Hooks `PreSync`/`PostSync` con un Job de polling** | Ejecuta un Job que verifica una dependencia externa (CRD, Service, otra app) y falla si no está | Cruza cualquier frontera (root ↔ set ↔ apps externas) |
+| **Health check personalizado** en `argocd-cm` | Un recurso "centinela" reporta `Healthy` solo cuando su dependencia lo está | Avanzado; útil para que `RollingSync`/UI confíen en ese estado |
+
+El uso de la anotación `argocd.argoproj.io/sync-wave` en los manifiestos no requiere mayor explicación, sin embargo, los otros mecanismos requerirían configuraciones adicionales, que si bien no voy a implementar por el momento en este Homelab, creo que conviene entender cómo se realizan.
+
+##### `RollingSync` en el `ApplicationSet`
+
+Tener `applicationsetcontroller.enable.progressive.syncs: true` en el values **solo habilita la capacidad** de ordenamiento; no activa ningún orden por sí mismo. Si el `ApplicationSet` no declara `spec.strategy`, se comporta como **`AllAtOnce`** (el default), es decir, crearía y sincronizaría **todas** las `Application` a la vez, y la anotación `argocd.argoproj.io/sync-wave` que se ponga en la plantilla **no ordenaría nada**.
+
+Para ordenar con gates de salud hay que declarar `strategy: RollingSync` y agrupar las apps mediante **labels**:
+
+```yaml
+# gitops/generated/reloader/config.yaml
+name: reloader
+namespace: reloader
+chartRepo: https://stakater.github.io/stakater-charts
+chart: reloader
+chartVersion: 2.2.17
+valuesFile: k8s/bootstrap/deployments/reloader-values.yaml
+syncWave: "40"
+layer: base
+```
+
+```yaml
+# gitops/appsets/platform-components.yaml (extracto)
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  strategy:                       # activa el orden con gates de salud
+    type: RollingSync
+    rollingSync:
+      steps:    # Se agregan matchs según cómo se quieran agrupar las apps
+        - matchExpressions:
+            - key: appset-layer
+              operator: In
+              values: ["base"]
+        - matchExpressions:
+            - key: appset-layer
+              operator: In
+              values: ["delivery"]
+  generators:
+    - git:
+        repoURL: https://github.com/eljavatar/kubernetes-homelab
+        revision: main
+        files:
+          - path: gitops/generated/*/config.yaml
+  template:
+    metadata:
+      name: '{{ .name }}'
+      namespace: argocd
+      labels:
+        appset-layer: '{{ .layer }}'   # label que seleccionan los steps
+      annotations:
+        argocd.argoproj.io/sync-wave: '{{ .syncWave }}'
+    spec:
+      project: homelab-platform
+      sources:
+        - repoURL: '{{ .chartRepo }}'
+          chart: '{{ .chart }}'
+          targetRevision: '{{ .chartVersion }}'
+          helm:
+            releaseName: '{{ .name }}'
+            valueFiles:
+              - '$values/{{ .valuesFile }}'
+        - repoURL: https://github.com/eljavatar/kubernetes-homelab
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ .namespace }}'
+      # Sin 'syncPolicy.automated': con RollingSync el controller del set dispara los syncs
+      syncOptions:
+        - CreateNamespace=true
+```
+
+Consecuencias a tener en cuenta antes de activarlo:
+
+1. **Se elimina el auto-sync** de las apps generadas: `RollingSync` desactiva `syncPolicy.automated` y es el controller del set quien lanza los syncs (respetando `syncWindows`). La documentación pide **no** definir `automated` en la plantilla.
+2. **Cada cambio en el template** se propaga por pasos, esperando `Healthy` entre ellos; es el comportamiento más parecido a `helm_release.wait` de Terraform.
+3. **Apps no seleccionadas** por ningún `matchExpressions` quedan fuera del rollout y hay que sincronizarlas a mano.
+4. `maxUpdate` permite limitar cuántas apps del step se actualizan a la vez (por ejemplo `25%`); por defecto es `100%`.
+5. `deletionOrder: Reverse` permite que el borrado ocurra en orden inverso a los steps.
+
+##### Hooks `PreSync`/`PostSync` con un Job de polling
+
+Ejemplo de hook que espera una dependencia generada por otra `Application`; en este ejemplo, el `Application` de argo-rollouts que es generado por el `ApplicationSet`, esperaría a que los CRDs de open-feature, los cuales se instalan mediante un `Application` manual (también se podrían agregar otros checks, como por ejemplo que los pods estén Healthy), demostrando que estos hooks pueden ser usados independientemente de si una `Application` es manual o generada:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wait-for-open-feature-crds
+  namespace: argo-rollouts
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: hook-waiter      # requiere SA + Role/RoleBinding propios
+      containers:
+        - name: wait
+          image: alpine/kubectl:1.36.0 # Imagen liviana oficial con kubectl
+          command:
+            # Alpine usa /bin/sh por defecto en lugar de /bin/bash
+            - /bin/sh
+            - -c
+            - |
+              kubectl wait --for=condition=Established crd/featureflags.openfeature.dev --timeout=300s
+```
+
+> El `Job` se ejecuta **después** de que la `Application` esté `Synced` y `Healthy`, y el `PostSync` no termina hasta que el Job finaliza (o falla). Necesita una `ServiceAccount` con `Role`/`RoleBinding` que le permita `get/list/watch` sobre el recurso que verifica: la SA por defecto del namespace no tiene esos permisos.
+
+**¿En qué namespace vive un hook?** Un hook **pertenece a una `Application`**: es un manifiesto más que esa app renderiza, y se aplica en su `destination.namespace` o en el `metadata.namespace` que declare el propio manifiesto. Por eso el Job del ejemplo vive en `argo-rollouts` (el namespace de la app que instala argo-rollouts) y su SA/Role/RoleBinding deben vivir ahí también. El recurso que espera (`crd/featureflags.openfeature.dev`) es *cluster-scoped*, así que se puede consultar desde cualquier namespace.
+
+| ¿Dónde poner el Job? | ¿Correcto? | Motivo |
+|----------------------|------------|--------|
+| Namespace de la app (ej. `argo-rollouts`) | ✅ | Mismo ciclo de vida, RBAC local, aparece en el árbol de la app |
+| Namespace `argocd` | ❌ | Ahí viven los CRs `Application`/`ApplicationSet` (plano de control); se necesitaría RBAC aparte y quedaría fuera del ciclo de vida de la app |
+| Otro namespace con `metadata.namespace` explícito | ⚠️ | Funciona, pero el objeto lo gestiona la app que lo renderiza; necesita RBAC en ese namespace |
+
+**¿Cómo sabe Argo CD que debe ejecutarlo?** Solo por las **anotaciones del propio objeto** (del Job); no hay que modificar la `Application` ni el `ApplicationSet`:
+
+```yaml
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: PostSync                     # lo convierte en hook
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded  # limpieza tras éxito
+    argocd.argoproj.io/sync-wave: "10"                    # opcional: ordena entre hooks
+```
+
+| Hook | Cuándo se ejecuta |
+|------|-------------------|
+| `PreSync` | Antes de aplicar los recursos (útil para migraciones/backups) |
+| `Sync` | En la misma wave a la que pertenece el hook |
+| `PostSync` | Después de que todos los recursos estén `Synced` y `Healthy` |
+| `PreDelete` / `PostDelete` | Al eliminar la `Application` |
+
+Detalles que importan:
+
+- Si el Job falla, **el sync falla**: es un gate real, no informativo.
+- Los hooks **no se aplican retroactivamente**: solo se ejecutan cuando esa `Application` se sincroniza.
+- `hook-delete-policy`: `HookSucceeded`, `HookFailed` o `BeforeHookCreation` (borra el anterior antes de crear el nuevo; el más útil si el Job es idempotente).
+
+**¿Y si el componente es un chart gestionado por `ApplicationSet`?** Ahí no hay carpeta donde dejar el Job; las opciones son:
+
+1. `helm.valuesObject`/values con `extraObjects` **si el chart lo soporta** (muchos charts lo implementan).
+2. Añadir una **segunda source** a la Application generada (chart + un `path` del repo con el hook); los manifiestos se combinan en el mismo sync.
+3. Crear una `Application` aparte (tipo directorio) solo para los hooks; hay que recordar que el hook corre al sincronizarse **su** app, así que habría que ordenar ambas con `sync-wave`/`RollingSync`.
+
+**Regla práctica:** si dos componentes dependen entre sí, lo más simple es tenerlos en el **mismo `ApplicationSet`** y expresar el orden con `RollingSync`. Usar hooks solo cuando la dependencia cruza capas (por ejemplo, algo de `root` que necesita un CRD creado por el set).
+
+##### Health checks personalizados en `argocd-cm`: enseñarle a Argo CD qué significa `Healthy`
+
+Es una capa **distinta** del [`RollingSync` en el `ApplicationSet`](#rollingsync-en-el-applicationset) que vimos previamente, y conviene no confundirlas:
+
+| Capa | Qué controla | Dónde se define |
+|------|--------------|-----------------|
+| **`RollingSync`** | **Quién espera y cuándo**: ordena pasos y espera que cada `Application` esté `Healthy` | `spec.strategy` del `ApplicationSet` |
+| **Health check personalizado** | **Cómo se decide** que un recurso (y por ende su `Application`) está `Healthy` | `resource.customizations.health.<grupo>_<Kind>` en `argocd-cm` |
+
+Un health check personalizado **no ordena nada** y **no puede consultar otras apps**: solo evalúa el `status` del propio objeto (`obj` en Lua). Sirve para que Argo CD entienda CRDs que no conoce (si no, quedan `Progressing`/`Unknown` y bloquean cualquier gate basado en salud).
+
+Ejemplo para un CRD de OpenFeature:
+
+```yaml
+# k8s/bootstrap/deployments/argo-cd-values.yaml -> configs.cm
+configs:
+  cm:
+    # La clave va entre comillas por los puntos del grupo
+    "resource.customizations.health.openfeature.dev_FeatureFlag": |
+      hs = {}
+      if obj.status ~= nil and obj.status.conditions ~= nil then
+        for _, c in ipairs(obj.status.conditions) do
+          if c.type == "Ready" then
+            if c.status == "True" then
+              hs.status = "Healthy"
+              hs.message = c.message
+              return hs
+            else
+              hs.status = "Degraded"
+              hs.message = c.message
+              return hs
+            end
+          end
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "Esperando a que FeatureFlag esté Ready"
+      return hs
+```
+
+Notas:
+
+- El formato de la clave es `<grupo>_<Kind>` (`openfeature.dev_FeatureFlag`, `cert-manager.io_Certificate`, `argoproj.io_Rollout`, ...).
+- Por seguridad, las librerías estándar de Lua están deshabilitadas; si el script las necesita, se habilitan con `resource.customizations.useOpenLibs.<grupo>_<Kind>: "true"`.
+- Argo CD ya trae health checks built-in para muchos tipos (`Application`, `Rollout`, `Certificate`, `PersistentVolumeClaim`, etc.), así que solo se definen los que falten.
+- El controller lee el `argocd-cm` de forma dinámica; si no se ve el efecto inmediato, forzar un refresh: `argocd app get <app> --refresh`.
+- Sobre el "recurso centinela": es una técnica que **usa** el health check, pero el centinela debe tener un `status` propio que refleje la dependencia (por ejemplo, un CRD de operador que publica `Ready=True` cuando ya creó sus CRDs). Un `ConfigMap` no sirve como centinela porque no tiene `status`.
+
+**En resumen:** `RollingSync` aporta el orden y la espera; el health check personalizado mejora la fidelidad del estado `Healthy` que ese orden consume. Sin `spec.strategy`, un health check solo cambia el estado/color en la UI (y los gates de hooks), no el orden de instalación.
+
+#### Frontera entre Terraform y Argo CD: el caso de los operadores de secretos
+
+La pregunta que surge al madurar el clúster es **qué se queda en Terraform y qué pasa a Argo CD**. El criterio general es la **naturaleza del paso**, no la herramienta:
+
+| Naturaleza del paso | Dónde encaja |
+|---------------------|--------------|
+| Configuración **de Vault** (auth method, token reviewer, policies, roles) | Terraform (provider de Vault) |
+| **Side effects fuera** del clúster (escribir en Vault) | Terraform |
+| **Esperas estrictas** entre sistemas y ejecuciones **one-shot** | Terraform |
+| **Manifiestos declarativos** dentro del clúster (CRs, CronJobs, RBAC, charts) | Argo CD |
+
+> **Decisión adoptada en este Homelab:** aunque varios de esos pasos **podrían** vivir en Argo CD, por **consistencia** se deja que **Terraform gestione todo el ciclo de vida de los operadores de secretos** (instalación, configuración, identidad y operación). Un solo dueño por dominio evita drift y discusiones del tipo "¿quién creó este objeto?". Argo CD se reserva para los componentes y aplicaciones cuya fuente de verdad es Git puro.
+
+##### Los 11 pasos del bootstrap de secretos
+
+| # | Paso (recurso de Terraform) | Naturaleza | Dueño "ideal" | **En este Homelab** |
+|---|-----------------------------|------------|---------------|---------------------|
+| 1 | Namespace `external-auth` | Declarativo | Cualquiera | **Terraform** |
+| 2 | TokenReviewer (`kubectl_manifest.vault_token_reviewer_setup`) | Identidad Vault↔clúster | Terraform | **Terraform** |
+| 3 | Secret `vault-token-reviewer-secret` | Objeto mutado por K8s | Terraform (provider oficial) | **Terraform** |
+| 4 | `vault_kubernetes_auth_backend_config` | Escritura en Vault | **Terraform (sin alternativa razonable)** | **Terraform** |
+| 5 | Namespaces `shared-ops`, `external-secrets`, `vault-secrets-operator` | Declarativo | Cualquiera | **Terraform** |
+| 6 | RBAC del sincronizador del CA (`vault_cert_syncer_rbac`) | Declarativo | Argo CD | **Terraform** |
+| 7 | CronJob `sync-vault-cert` | Declarativo | Argo CD | **Terraform** |
+| 8 | Primer sync del CA (`create job --from=cronjob`) | One-shot imperativo | Terraform | **Terraform** |
+| 9 | Charts de ESO y VSO | Declarativo | Argo CD | **Terraform** |
+| 10 | `VaultConnection` de VSO | Declarativo (CR) | Argo CD | **Terraform** |
+| 11 | `VaultAuthGlobal` de VSO | Declarativo (CR) | Argo CD | **Terraform** |
+
+##### Por qué Terraform se queda con todo el ciclo de secretos
+
+1. **Identidad y confianza:** los pasos 2–4 son el "cableado" entre Vault y el clúster. Si algo falla ahí, **ningún** operador puede autenticarse; tenerlo en el mismo lugar que el resto del bootstrap simplifica el diagnóstico.
+2. **Side effects externos:** escribir en Vault desde Argo (para configurar los datos del TokenReviewer (paso 4)) obligaría a dejar un token de Vault con permisos dentro de un pod del clúster: mala idea y nada idempotente.
+3. **Acciones one-shot:** el primer job del CA es una ejecución imperativa (paso 8); en Argo solo se logra con hooks y RBAC extra.
+4. **Esperas reales:** los pasos 10–11 necesitan que VSO esté operativo; Terraform lo garantiza con `helm_release.wait` + `depends_on`, mientras que en App-of-Apps de Argo eso no existe (y en ApplicationSet requiere `RollingSync`).
+5. **Un solo dueño:** mover solo una parte del flujo crea objetos gestionados por dos herramientas, que es exactamente el problema que se documentó con `sync_with_tf`.
+
+**Lo que se gana:** orden garantizado, manejo correcto de secretos mutables, y un único punto de diagnóstico. Lo que se pierde: esos componentes no aparecen en Argo CD (no hay "árbol GitOps" de los operadores de secretos), y cualquier cambio de versión/values pasa por `make tf-apply`.
+
+##### Si algún día se migran los CRs de VSO a Argo CD (referencia)
+
+No se recomienda migrar el token reviewer ni la escritura en Vault, pero **sí** sería viable migrar los CRs declarativos. El patrón correcto es **incluirlos en la misma `Application` que el chart de VSO** (segunda source tipo directorio) y ordenarlos por `sync-wave`:
+
+```yaml
+# En el manifiesto de la app de VSO: los CRs van en un wave posterior al chart
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+kind: VaultConnection
+```
+
+Y si se necesitara bloquear hasta que el operador esté listo, un hook determinista:
+
+```yaml
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+kind: Job
+spec:
+  template:
+    spec:
+      containers:
+        - name: wait
+          image: alpine/kubectl:1.36.0
+          command: ["kubectl", "wait", "--for=condition=Available",
+                    "deploy/vault-secrets-operator-controller-manager",
+                    "-n", "vault-secrets-operator", "--timeout=300s"]
+```
+
+Y para el CA que consumen ESO/VSO, marcar el volumen como `optional: true` permite que el pod arranque aunque el ConfigMap/Secret del certificado aún no exista (el CronJob lo crea después y un rollout/Reloader lo recoge).
+
+#### Pruebas locales sin commits "basura"
+
+En términos generales, `argocd app sync` materializa lo que hay en `targetRevision`, es decir **lo que ya está en Git**: sin commit ni push no hay nada nuevo que sincronizar. Sin embargo, hay que tener en cuenta que como tal `sync` no compara contra Git, compara el estado deseado de esa `Application` contra el estado vivo del clúster.
+
+Para probar sin "commits basura" existen cuatro mecanismos, con alcances muy distintos:
+
+| Mecanismo | ¿Requiere commit/push? | ¿Sirve para upgrades? | Limitaciones |
+|-----------|------------------------|-----------------------|--------------|
+| `argocd app sync <app> --local <dir>` | No | Sí | Solo apps de **una** source; el `AppProject` valida `repoURL`, no rutas (es decir, no sirve si se quieren probar configuraciones de archivos `values.yaml`); el árbol local también se escanea por symlinks |
+| Application temporal con `--values-literal-file` | No | Sí | Se crea y se borra a mano |
+| `helm upgrade --install` directo | No | Sí | Argo no registra el estado; luego hay que adoptarlo. Útil solo si se está instalando la aplicación por primera vez (o si es una aplicación/servicio que se puede instalar varias veces sin causar conflictos con instalaciones existentes y sin causar problemas de recursos), ya que los comandos de `helm` no aplican sobre aplicaciones gestionadas por Argo CD |
+| `argocd app sync <app>` (en una rama de pruebas) | **Sí** | Sí | Sin push no hay cambios que Argo pueda ver |
+
+Hay que tener en cuenta que para realizar las pruebas en local que involucran la ejecución de comandos `argocd app --local` y sin tener que hacer commit/push (mecanismos 1 y 2), el `Application` debería tener deshabilitada la sincronización automática (`spec.syncPolicy.automated.enabled: false`), ya que Argo CD intenta constantemente reconciliar el clúster con el repositorio remoto de Git, lo cual borraría/descartaría las pruebas locales de inmediato.
+
+**NOTA: Con `ApplicationSet` no existe sincronización "en local":** El set genera `Application` a partir de lo que hay en Git, así que para probar se tendría que crear una Application manual temporal (opción anterior) o se usaría el **generador `pullRequest`** en un clúster/namespace de preview para que cada PR genere su propia Application efímera; otra alternativa sería probar mediante una rama de prueba como lo veremos más adelante.
+
+##### Uso del flag `--local`: qué hace y por qué fallaría en este repositorio
+
+Según la referencia de la CLI, los flags *local* tienen los siguientes propósitos:
+- **`--local`:** Path to a local directory. When this flag is present no git queries will be made.
+- **`--local-repo-root`:** Path to the repository root. Used together with `--local`.
+
+Y podríamos usarlos de la siguiente forma:
+
+```sh
+# Caso válido: app de UNA sola source (directorio/Kustomize), sin consultar Git.
+# Se requiere que previamente se haya creado la app (con el respectivo 'kubectl apply' o con
+# 'argocd app create' o que ya haya sido creada y sincronizada mediante un commit/push previo),
+# ya que de lo contrario arrojaría un error 'PermissionDenied desc = permission denied' debido
+# a que 'argocd app sync' no puede sincronizar una Application inexistente, y por ende tampoco
+# instalaría/actualizaría la respectiva aplicación/servicio/componente.
+kubectl apply -f gitops/apps/mi-app/application.yaml # Se crea la Application si no existe
+argocd app diff mi-app --local "$PWD/gitops/apps/mi-app" --local-repo-root "$PWD"
+argocd app sync mi-app --local "$PWD/gitops/apps/mi-app" --local-repo-root "$PWD" --dry-run
+```
+
+Sin embargo, como hemos visto previamente, en este Homelab las aplicaciones de componentes suelen usar dos `sources` (chart de Helm + `ref: values`), y por tanto, si se intenta sincronizar usando el flag `--local`, se obtendría el siguiente error: *argocd cli does not work on multi-source app with --local flag*.
+
+Así que esta opción solo es recomendable si el `Application` tiene un único source.
+
+Una opción alternativa sería que el `values.yaml` esté en la misma ruta del `application.yaml`, para que de esa forma en el manifiesto, a la propiedad `valueFiles` en vez de pasarle algo como `$values/k8s/bootstrap/deployments/mi-app-values.yaml` (donde `$values` es la referencia al segundo source que causa el conflicto de multi-source), se le pasaría algo como `mi-app/mi-app-values.yaml` (se le pasaría con la carpeta ya que esta ruta es relativa al directorio definido en la propiedad `spec.source.path`, que en nuestro caso definimos en el root con el valor `gitops/apps`). Sin embargo, hay que tener en cuenta que esto implicaría duplicar los archivos `values.yaml` que ya existen en la carpete `k8s/bootstrap/deployments`.
+
+##### Flujo recomendado: Application temporal con los values embebidos
+
+`argocd app create` soporta `--values-literal-file`, que **importa el archivo local como bloque literal `helm.values` dentro de la spec**: la Application de prueba no depende de Git y podríamos usar el `values.yaml` de `k8s/bootstrap/deployments/`.
+
+```sh
+# 1. Crear la Application de prueba (sin Git, sin commits)
+argocd app create open-feature-operator-test \
+  --project homelab-platform \
+  --repo https://open-feature.github.io/open-feature-operator \
+  --helm-chart open-feature-operator \
+  --revision 0.9.3 \
+  --release-name open-feature-operator \
+  --dest-server https://kubernetes.default.svc \
+  --dest-namespace open-feature-operator-system \
+  --values-literal-file k8s/bootstrap/deployments/open-feature-values.yaml \
+  --sync-option CreateNamespace=true \
+  --set-finalizer \
+  --sync-policy none \
+  --upsert
+
+# 2. Previsualizar y aplicar
+argocd app diff open-feature-operator-test
+# En este caso 'sync' sí crea la aplicación subyacente porque se creó un Application independiente,
+# con su fuente de verdad ya resuelta: no hay Git involucrado en el renderizado.
+# La fuente en este caso es el chart y el targetRevision es la versión (0.9.3):
+argocd app sync open-feature-operator-test
+kubectl get pods -n open-feature-operator-system -o wide
+
+# 3. Probar un upgrade: cambiar values y/o versión, y volver a sincronizar
+argocd app set open-feature-operator-test --values-literal-file k8s/bootstrap/deployments/open-feature-values.yaml
+argocd app set open-feature-operator-test --revision 0.9.4
+argocd app sync open-feature-operator-test
+
+# 4. Limpieza total (equivalente a 'helm uninstall', ver subsección siguiente)
+argocd app delete open-feature-operator-test --cascade --yes
+kubectl delete ns open-feature-operator-system   # el namespace no lo borra Argo CD
+```
+
+> **NOTA:** Hay que tener en cuenta que al igual que sucede con las pruebas que se realicen con el mecanismo de `helm upgrade --install`, esta prueba es útil solo si se está instalando la aplicación por primera vez (o si es una aplicación/servicio que se puede instalar varias veces sin causar conflictos con instalaciones existentes y sin causar problemas de recursos), ya que en este caso el comando `argocd app sync` intenta sincronizar una `Application` cuya fuente de verdad (el repositorio que se pasa a través del argumento `--repo`) no es el repositorio de Git, sino un chart de Helm, y por tanto, a través de este mecanismo no se podría actualizar/sincronizar una `Application` que ya haya sido creada y sincronizada desde el repositorio remoto de Git.
+
+> **`--set-finalizer`** añade `resources-finalizer.argocd.argoproj.io` a la Application: sin él, al borrarla dejaría los recursos huérfanos en el clúster.
+
+##### Desinstalar un componente de prueba (equivalente a `helm uninstall`)
+
+```sh
+# Borra la Application Y sus recursos gestionados (--cascade es el default)
+argocd app delete open-feature-operator-test --cascade --yes
+
+# Verificación posterior
+argocd app list
+kubectl get crd | grep -i openfeature
+kubectl get ns open-feature-operator-system
+```
+
+| Aspecto | `helm uninstall` | Argo CD |
+|---------|------------------|---------|
+| Recursos del release | Se eliminan | `argocd app delete --cascade` los poda |
+| CRDs incluidos en el chart | Se borran, salvo `helm.sh/resource-policy: keep` | Igual: Argo CD mapea esa anotación a `argocd.argoproj.io/sync-options: Delete=false` |
+| Namespace creado con `--create-namespace` | **No** se borra | **No** se borra (usar `kubectl delete ns ...`) |
+| Registro del release | Se elimina | La `Application` se elimina |
+
+- **Finalizer obligatorio:** sin `metadata.finalizers: [resources-finalizer.argocd.argoproj.io]` (YAML) o `--set-finalizer` (`app create`), borrar la Application **no** toca los recursos.
+- Opciones útiles: `--propagation-policy foreground|background` (default `foreground`) y `--wait` para esperar a que termine el borrado.
+- **Desinstalar manteniendo la definición:** quitar el `application.yaml` del repositorio y ejecutar `argocd app sync --prune`, o `argocd app delete --cascade=false` (deja los recursos huérfanos para readoptarlos).
+- Si un CRD queda en `Terminating`, normalmente hay CRs con finalizers detrás: borra primero los CRs (o el namespace).
+
+> Al usar `argocd app create`, Argo registra el release y su estado, así que esta vía **sí cubre upgrades** (no solo la primera instalación). Cuando la prueba esté validada, se hace el commit de `gitops/apps/<componente>/application.yaml`, se sincroniza la Application real y se borra la temporal.
+
+##### Probar el levantamiento completo con una rama `test/<tema>`
+
+El flujo "un solo comando" (`make tf-apply`) que usamos con Terraform choca con una realidad: **Argo CD lee Git**, no el disco. La solución es publicar los manifiestos en una rama de trabajo que se **reescribe en cada publicación** (nunca acumula commits de prueba) y decirle a la raíz que sincronice esa rama.
+
+```text
+make tf-apply
+ ├─ make gitops-publish      -> publica gitops/ + k8s/bootstrap/deployments/ en test/<tema> (un commit, force-with-lease)
+ └─ terraform apply
+     ├─ helm_release.argo_cd
+     ├─ kubectl_manifest AppProject
+     ├─ kubectl_manifest Application root  (targetRevision = var.gitops_branch)
+     ├─ kubectl_manifest ApplicationSet    (revision y targetRevision = var.gitops_branch)
+     └─ terraform_data.argocd_wait_gitops  (kubectl wait: root Synced + componente Healthy)
+```
+
+Piezas implicadas:
+
+| Pieza | Función |
+|-------|---------|
+| [`scripts/gitops-publish.sh`](scripts/gitops-publish.sh) | `git switch -C <rama>`, add selectivo, commit y `push --force-with-lease` |
+| `GITOPS_BRANCH` (Makefile) | Rama de trabajo: `test/gitops-bootstrap` por defecto |
+| `var.gitops_branch` (Terraform) | Se inyecta con `replace()` en el `yaml_body` de la raíz |
+| `terraform_data.argocd_wait_gitops` | Espera activa para que el apply de terraform, no termine antes de que las aplicaciones que Argo CD gestiona estén Ready |
+
+**1. Preparar la credencial de push (deploy key SSH, solo este repo):**
+
+```sh
+ssh-keygen -t ed25519 -C "gitops-automation@eljavatar" -f ~/.ssh/id_ed25519_gitops -N ""
+# Podemos verificar la lista de llaves que tenemos ejecutando:
+ls -l ~/.ssh/id_*.pub
+
+chmod 600 ~/.ssh/id_ed25519_gitops
+pbcopy < ~/.ssh/id_ed25519_gitops.pub
+# GitHub -> repo -> Settings -> Deploy keys -> Add deploy key
+#   [x] Allow write access
+
+# Verificar
+ssh -i ~/.ssh/id_ed25519_gitops -o IdentitiesOnly=yes -T git@github.com
+
+# Agregamos el remote en SSH
+#git remote set-url origin git@github.com:eljavatar/kubernetes-homelab.git
+# Podríamos setearlo como orígen, pero para flujos automatizados de CI/CD,
+# es mejor práctica agregar otro origen:
+git remote add gitops git@github-gitops:eljavatar/kubernetes-homelab.git
+```
+
+**2. Publicar y levantar todo:**
+
+```sh
+# Otorgamos permisos al script
+chmod +x scripts/gitops-publish.sh
+```
+
+```sh
+make tf-apply                                    # usa test/gitops-bootstrap
+make tf-apply GITOPS_BRANCH=test/observability   # otra prueba
+```
+
+**Qué hace exactamente `git switch -C`:** mueve la rama al commit actual **sin tocar el working tree**. Los archivos modificados y los untracked se conservan; si el cambio de rama fuese a sobrescribir un archivo con diferencias, aborta sin borrar nada. El `push --force-with-lease` deja la rama remota con **un único commit por encima de `main`**, y `--force-with-lease` falla si el remoto cambió por fuera, es decir, si se hizo un commit/push desde otro lado causando que lo que hay en el remoto sea distinto a lo que tiene la rama local.
+
+**3. Verificar:**
+
+```sh
+kubectl get application -n argocd
+kubectl get application root -n argocd -o jsonpath='{.status.sync.status}{"\n"}'          # Synced
+kubectl get application open-feature-operator -n argocd -o jsonpath='{.status.health.status}{"\n"}'  # Healthy
+```
+
+La espera activa ya está en Terraform; si se prefiere hacerla a mano con el CLI:
+
+```sh
+argocd app wait root --health --timeout 300
+argocd app wait open-feature-operator --health --timeout 600
+```
+
+**4. Pasar a `main` sin rastros de commits de prueba (squash):**
+
+```sh
+git switch main
+# Con '--ff-only' (Fast-Forward) el puntero local avanza hasta el último commit del remoto sin llenar el
+# el de Git de "commits de merge" automáticos que  por lo general solo hacen que se ensucie el historial.
+# En caso de que falle (debido a que los commits locales divergen de los remotos), se aborta por seguridad
+# y no se modifica nada en la rama local.
+# Es decir, fallará si hemos hecho un commit en local que no existe en el remoto, y en este caso lo usamos
+# ya que queremos subir un único commit con los cambios definitivos.
+git pull --ff-only
+git merge --squash test/gitops-bootstrap
+git commit -m "feat(gitops): bootstrap declarativo con Argo CD y App-of-Apps"
+git push origin main
+
+# Limpieza de la rama de trabajo
+git branch -D test/gitops-bootstrap
+git push origin --delete test/gitops-bootstrap
+```
+
+El squash convierte **todos** los commits de prueba en **un único commit** en `main` (que es el mensaje que escribiríamos). Cuando el repo sea estable, la rama de trabajo pasa a ser `main` (`GITOPS_BRANCH=main`) y se puede activar `prune: true` en la raíz.
+
+**5. Componentes posteriores:** Después del bootstrap con Terraform ya no se usaría `make tf-apply`, por lo tanto, después de crear/actualizar el respectivo `gitops/apps/<componente>/application.yaml`, se ejecutaría `make gitops-publish` (o `make tf-apply` si se requiere recrear el clúster) y luego `argocd app sync <componente>`. No hace falta tocar el script ya que este publica por defecto los cambios en las carpetas `gitops/` y `k8s/bootstrap/deployments/`, y puede ajustarse con `GITOPS_PATHS="gitops/ k8s/bootstrap/deployments/ otro/"`.
+
+> **Values modificados en la rama de pruebas:** las Applications hijas leen sus `values.yaml` con una segunda source `ref: values` que apunta a `main`. Mientras no se cambie ningún `k8s/bootstrap/deployments/*-values.yaml`, esto funcionaría (los archivos ya existen en `main`). Si se está probando un values nuevo, se debería cambiar esa source a la rama de pruebas:
+>
+> ```yaml
+>     - repoURL: https://github.com/eljavatar/kubernetes-homelab
+>       targetRevision: test/gitops-bootstrap   # o la rama en uso
+>       ref: values
+> ```
+
+#### Desinstalar un componente gestionado desde Git
+
+Anteriormente vimos cómo [desinstalar un componente de prueba local](#desinstalar-un-componente-de-prueba-equivalente-a-helm-uninstall) (similar a lo que hace el comando `helm uninstall`), lo cual funciona en ese caso porque esa Application **no está declarada en Git**, y por tanto nadie la recrea.
+
+Sin embargo, cuando la `Application` **sí** viene del repositorio, `argocd app delete` a secas es insuficiente en dos de los tres escenarios que veremos en la siguiente tabla, porque hay un controlador cuyo trabajo es exactamente volver a crearla:
+
+| Escenario | Dueño de la Application | ¿`argocd app delete --cascade --yes` basta? |
+|-----------|-------------------------|---------------------------------------------|
+| Application temporal (`argocd app create`, `--values-literal-file`) | Nadie: no está en Git | **Sí** |
+| Hija de `root` (`gitops/apps/<componente>/application.yaml`) | `root` con `selfHeal: true` | **No**: se recrea |
+| Generada por el `ApplicationSet` (`gitops/generated/<componente>/config.yaml`) | El `ApplicationSet` (ownerReference) | **No**: se regenera |
+
+El caso A es el que vimos anteriormente en la sección de [desinstalar un componente de prueba](#desinstalar-un-componente-de-prueba-equivalente-a-helm-uninstall), así que a continuación veremos los casos B y C.
+
+**Caso B — hija de `root`**
+
+`root` tiene `automated.selfHeal: true`, así que si se borra la Application, el recurso gestionado desaparece del clúster, `root` pasa a `OutOfSync` y lo vuelve a aplicar en la siguiente reconciliación (hasta `timeout.reconciliation: 120s`). El orden correcto es **Git primero**:
+
+```sh
+# 1. Sacar el manifiesto del alcance de root (Git primero, NUNCA al revés)
+git mv gitops/apps/descheduler gitops/archive/descheduler    # mover fuera de gitops/apps
+git commit -m "chore(gitops): retirar descheduler" && git push
+
+# 2. Esperar a que root quede Synced (no habrá diff: con prune: false la Application queda huérfana)
+argocd app get root
+
+# 3. Ahora sí: borrar la Application y sus recursos gestionados
+argocd app delete descheduler --cascade --yes
+
+# 4. Verificación (los namespaces compartidos como kube-system NO se borran)
+argocd app list
+kubectl get ns
+```
+
+- El `git mv` **debe salir de `gitops/apps/`**: renombrar la carpeta a `gitops/apps/_archive/descheduler` no sirve, porque `gitops/apps/_archive/descheduler/application.yaml` sigue matcheando el `include: '*/application.yaml'` de la raíz. Alternativa mínima: `git mv gitops/apps/descheduler/application.yaml gitops/apps/descheduler/application.yaml.retired`.
+- Si se invierte el orden (borrar primero y hacer `push` después) hay una **reinstalación** entre ambos pasos, y en charts que gestionan `PersistentVolumeClaim` eso puede implicar pérdida de datos.
+- Con `prune: false`, quitar el manifiesto **no** borra ni la Application ni sus recursos: solo "suelta" la propiedad. Por eso, en ese caso el paso 3 es manual.
+- Cuando se activa `prune: true` el paso 3 sobra, **pero la cascada a los recursos solo ocurre si la Application lleva el finalizer** `resources-finalizer.argocd.argoproj.io`, Antes de pasar a `prune: true`, hay que asegurarse de que el manifiesto del Application tenga lo siguiente (a menos que se desee que los recursos sigan existiendo pero ya no gestionados por el flujo de GitOps):
+
+  ```yaml
+  metadata:
+    name: descheduler
+    namespace: argocd
+    finalizers:
+      - resources-finalizer.argocd.argoproj.io
+  ```
+
+**Caso C — generada por el `ApplicationSet`**
+
+Aquí es al revés: **no se borra la Application con el CLI**, porque el controlador la regeneraría en el siguiente reconcile. Se borra el `config.yaml` y el `ApplicationSet` hace el trabajo:
+
+```sh
+git rm -r gitops/generated/descheduler
+git commit -m "chore(gitops): retirar descheduler del catalogo" && git push
+```
+
+Aquí **sí** hay borrado completo sin comandos extra, porque `preserveResourcesOnDeletion` no está definido y su valor por defecto es `false`, por lo tanto, el controlador añade el finalizer `resources-finalizer.argocd.argoproj.io` a las Applications que genera, y en consecuencia el borrado de la Application cascadea a los recursos desplegados.
+
+Consideraciones a tener en cuenta:
+
+- Para retirar el componente **conservando** los recursos (por ejemplo para readoptarlos con Terraform): agregar `spec.syncPolicy.preserveResourcesOnDeletion: true` en el `ApplicationSet`, o `argocd app delete --cascade=false` en la ventana entre el `push` y el reconcile (frágil, no recomendado como proceso).
+- **Nunca** borrar el `ApplicationSet` completo para retirar un componente: se lleva **todas** sus Applications y todos sus recursos.
+- El `ApplicationSet` y `root` los aplica Terraform con `kubectl_manifest`; si se borran a mano, el siguiente `make tf-apply` los recrearía.
+- En modo `sync_with_tf = true` el componente también existiría en Terraform: ahí el "uninstall" correcto es `terraform destroy -target=helm_release.<componente>` o volver a `false` y aplicar.
+
+> **Regla general:** en GitOps la baja de un componente es un **commit**, no un comando. El comando (`argocd app delete`) solo remata lo que Git ya dejó de declarar cuando `prune: false`.
+
+#### Consideraciones adicionales
+
+##### Políticas de Sincronización (`spec.syncPolicy.automated`)
+
+Para definir qué políticas de sincronización debe seguir una `Application`, usamos las propiedades bajo el tag `spec.syncPolicy`; hay varias opciones de configuración, pero entre las que más nos interesan para entender cómo se sincroniza nuestro clúster de Kubernetes con lo que hay en Git, están las propiedades bajo `spec.syncPolicy.automated` (la sincronización automatizada reintenta por defecto los intentos fallidos 5 veces, con los siguientes intervalos entre intentos: 5s, 10s, 20s, 40s, 80s; los reintentos pueden ajustarse mediante `spec.syncPolicy.retry`):
+
+| Campo | Qué lo dispara | Qué hace | En pruebas locales |
+|-------|----------------|----------|--------------------|
+| `automated.enabled` | Cambio en Git (polling o webhook) | Permite la sincronización automatizada de la aplicación (por defecto `true`) | Puede mantenerse en `true`, aunque en un equipo con múltiples desarrolladores sería mejor **desactivarlo** (`false`), ya que un commit hecho por otro desarrollador haría que se reviertan los cambios hechos a mano |
+| `automated.selfHeal` | Una edición/borrado manual en el clúster, cambios de un HPA u operador | Especifica si debe ejecutarse una sincronización parcial de la aplicación cuando los recursos se modifican únicamente en el clúster de Kubernetes y no se detectan esos cambios en Git (por defecto `false`) | **Desactivar** (`false`), ya que de no hacerse revertiría los cambios hechos a mano en segundos |
+| `automated.prune` | Un recurso gestionado por Argo CD desaparece de Git | Especifica si un recurso eliminado de Git debe eliminarse también del clúster durante la sincronización automática (por defecto `false`) | Se puede activar (`true`), pero se debe revisar el diff antes de refactorizar |
+
+- `selfHeal` **no** tiene relación con los commits: el commit lo detecta la reconciliación (polling/webhook); `selfHeal` actúa cuando el **estado vivo** del clúster difiere del declarado, por lo que es útil desactivarlo cuando se quiere hacer pruebas en local sin que el reconciliador revierta los cambios.
+- `prune` **solo** borra recursos con el tracking de esa `Application`; nunca toca recursos ajenos.
+- En producción se suele combinar `prune: true` con `spec.syncPolicy.syncOptions: [PruneLast=true, ApplyOutOfSyncOnly=true]` y, en recursos delicados, se agrega en manifiesto del `Application` la anotación `argocd.argoproj.io/sync-options: Prune=false`.
+- Para lograr que algunas aplicaciones requieran intervención manual, el truco consiste en desactivar la política de sincronización automática (`automated.enabled: false`) en sus manifiestos específicos dentro de Git. De esta forma, la App-of-Apps "creará" el recurso en la interfaz de Argo CD (quedará en estado *OutOfSync*), pero no desplegará nada en Kubernetes hasta que se haga clic en "*Sync*" manualmente.
+
+##### Intervalo de sincronización y webhooks
+
+| Parámetro (`argocd-cm`) | Default | Efecto |
+|-------------------------|---------|--------|
+| `timeout.reconciliation` | **120s** | Cada cuánto se consulta Git buscando una nueva versión de manifiestos. `0` desactiva el polling. |
+| `timeout.reconciliation.jitter` | **60s** | Aleatorio añadido para repartir las consultas (con 120s de base, el refresco cae entre 2 y 3 minutos). |
+| `timeout.hard.reconciliation` | `0s` | Refresco completo ignorando caché; `0` desactivado. |
+
+En este Homelab el values fija `timeout.reconciliation: 120s` y `jitter: 60s`. Para acercarse a la inmediatez de un push se podría configurar un **webhook** en GitHub (*Settings → Webhooks*), con *Payload URL* en el endpoint **`/api/webhook`** de Argo CD y el secreto en la clave `webhook.github.secret` de `argocd-secret` (equivale a `configs.secret.githubSecret` en el values del chart).
+
+| Escenario | Polling recomendado | Webhook |
+|-----------|---------------------|---------|
+| Laboratorio / aprendizaje | 60–120s | Opcional |
+| Staging corporativo | 120–180s | Sí (latencia percibida < 10s) |
+| Producción | 180–300s + jitter | Sí, con `selfHeal: true` y `prune` controlado |
+| Muchas Applications (>200) | 300s o más, jitter alto | Sí, para no saturar el `repo-server` |
+
+> En este Homelab el webhook requeriría exponer `/api/webhook` por Cloudflare Tunnel; por el momento no tengo planeado hacerlo ya que el polling de 2–3 minutos es suficiente.
+
+##### ¿Cuándo usar Kustomize?
+
+| Escenario | ¿Kustomize? |
+|-----------|-------------|
+| Mismos manifiestos con diferencias por entorno (`base/` + `overlays/local`, `overlays/prod`) | Sí, es su caso natural |
+| Parchear manifiestos de terceros sin fork (`replicas`, `image`, `sidecars`) | Sí, con `patches` |
+| Generar `ConfigMap`/`Secret` desde archivos con hash que fuerza rollout | Sí (`configMapGenerator`, `secretGenerator`) |
+| Vendorizar un chart dentro del repositorio (`helmCharts:` en `kustomization.yaml`) | Sí |
+| Reutilizar bloques entre aplicaciones (`components/`) | Sí |
+| Ajustar `namespace`, `namePrefix` o labels comunes | Sí |
+| Solo cambiar 20 líneas de `values` de un chart de terceros | **No**: Helm + `valueFiles` es más simple |
+
+En este repositorio, en principio (los componentes del bootstrap) bastaría con Helm + `valueFiles` (lo que ya hace el patrón multi-source). Kustomize empezará a aportar cuando existan manifiestos propios repetidos por entorno (Gateway, certificados, namespaces, `tests/`) o cuando se quiera parchear charts sin duplicar values completos.
+
+##### Arquitectura multi-repo: plataforma vs repositorios de aplicaciones
+
+En entornos productivos, el repositorio de plataforma no suele contener los manifiestos de todas las aplicaciones, sino que son los repositorios de cada aplicación los que contendrían los manifiestos de sus propias Applicationn.
+
+Para esto, hay dos arquitecturas principalmente:
+
+**A) Registro centralizado (recomendado para este Homelab):** El repo de plataforma guarda la gobernanza y **punteros** a los demás repositorios:
+
+```text
+kubernetes-homelab/gitops/
+├── projects/
+│   ├── homelab-platform.yaml     # gobernanza del clúster
+│   └── apps-team.yaml            # permisos acotados para las aplicaciones
+└── tenants/
+    └── mi-app/
+        └── application-root.yaml      # source.repoURL = repositorio de la app
+```
+
+```yaml
+# gitops/projects/apps-team.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: apps-team
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/eljavatar/mi-app          # solo sus repos, no todo GitHub
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "mi-app"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  # Sin clusterResourceWhitelist: las aplicaciones no crean CRDs ni ClusterRoles
+```
+
+```yaml
+# gitops/tenants/mi-app/application-root.yaml
+# Este Application es solo un puntero al otro repositorio
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mi-app
+  namespace: argocd
+spec:
+  project: apps-team
+  source:
+    repoURL: https://github.com/eljavatar/mi-app        # OTRO repositorio
+    targetRevision: main
+    path: deploy/overlays/local
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mi-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+**B) Totalmente descentralizado:** Cada repositorio de aplicación contendría su propio `AppProject` y su Application raíz; la plataforma solo tendría un bootstrap que apunta al `gitops/bootstrap` de cada repo. Es el modelo de organizaciones con equipos autónomos, pero implica confiar en que cada equipo mantiene bien sus permisos.
+
+> **Regla de gobernanza:** el `AppProject` debe vivir en el **repositorio de plataforma**, no en el de la aplicación. Si viviera en el repo de la app, esa aplicación podría auto-concederse permisos de ámbito de clúster.
+
+#### Métricas con VictoriaMetrics y OpenObserve
+
+Como en el clúster **no** hay operador de Prometheus, no se usan `ServiceMonitor`. En su lugar:
+
+1. `metrics.enabled: true` en `server`, `controller`, `repoServer` y `applicationSet` crea un `Service` adicional con el puerto `/metrics` (8083, 8082, 8084 y 8080 respectivamente).
+2. `global.addPrometheusAnnotations: true` añade `prometheus.io/scrape`, `prometheus.io/port` y `prometheus.io/path` a esos Services, de modo que un `vmagent` con descubrimiento por anotaciones los encuentra sin CRDs de Prometheus.
+
+```yaml
+# Ejemplo orientativo de job de scraping en VictoriaMetrics (vmagent/vmselect)
+- job_name: kubernetes-services-annotated
+  kubernetes_sd_configs:
+    - role: service
+  relabel_configs:
+    # Solo los Services que tengan la anotación de scraping
+    - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+      action: keep
+      regex: "true"
+    # Puerto de métricas indicado por el chart
+    - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_port]
+      action: replace
+      target_label: __address__
+      regex: (.+)
+      replacement: ${1}
+```
+
+> **Nota:** el nombre final de los Services depende del release (`argo-cd-argocd-server-metrics`, `argo-cd-argocd-application-controller-metrics`, etc.), así que es más robusto descubrir por anotación que fijar el nombre a mano en el scrape config.
+
+#### Troubleshooting
+
+| Síntoma | Causa probable | Solución |
+|---------|----------------|----------|
+| La UI responde `502/503` a través del Gateway | El `argocd-server` sigue sirviendo HTTPS mientras el Gateway ya terminó TLS | Verificar `configs.params."server.insecure": true` y que el `HTTPRoute` apunte al puerto HTTP del Service |
+| El `HTTPRoute` queda `Accepted=False` | `parentRefs` mal referenciado o hostname fuera del wildcard del listener | Debe apuntar a `external-gateway`/`gateway-api-system`, `sectionName: https-local`, hostname `argocd.eljavatar.home` |
+| `helm_release` falla con `InvalidParameter` o el admin no tiene la contraseña esperada | El hash bcrypt se pasó con `--set` y el shell/Helm reinterpretó los `$` | Usar `--set-string` con comillas dobles, o `set_sensitive` en Terraform |
+| `terraform plan` falla leyendo `vault_kv_secret_v2` | El secreto no existe en Vault todavía | Ejecutar el Paso 1 (`vault kv put ...`) antes de `make tf-apply` |
+| `repo-server` reiniciado por OOM | Repos grandes o muchos manifiestos renderizados en paralelo | Mantener `reposerver.parallelism.limit: 4` y subir el límite de RAM si crece el repositorio |
+| `ComparisonError: ... repository contains out-of-bounds symlinks. file: X` | Argo CD (desde 2.5) bloquea symlinks que salen de la raíz del repo o del chart, **incluidos los de destino absoluto**; aunque en la máquina local se resuelvan dentro del proyecto, en el `repo-server` el clon vive en otra ruta y el destino absoluto queda fuera | Reemplazar el symlink por archivo/directorio real o relativizarlo (`ln -s ../.clinerules .roo/rules`). Detectar absolutos con `find . -type l -not -path "./.git/*" -exec sh -c 'readlink "$1" \| grep -q "^/" && echo "ABS: $1"' _ {} \;`. **No** desactivar `reposerver.allow.oob.symlinks` salvo que se acepte el riesgo (mitiga CVE-2022-24904) |
+| `ComparisonError: ... gitops/apps: app path does not exist` | El `source.path` de la Application raíz no existe en el commit remoto (Git no versiona carpetas vacías) | Versionar la estructura con `touch gitops/apps/.gitkeep` + commit + push, o probar el componente con una Application temporal en lugar de la raíz |
+| Root aparece `Synced` pero **no se crean** las Applications hijas (y `kubectl wait` agota el tiempo) | `directory.include` se evalúa contra el **path relativo** del archivo: `include: 'application.yaml'` solo matchea un archivo en la raíz de `gitops/apps`, no `gitops/apps/<componente>/application.yaml`. Root sincroniza entonces **0 recursos** y termina "con éxito" | Usar `include: '*/application.yaml'` (mantiene el filtro por nombre exacto y no arrastra `application2.yaml`). Verificar con `argocd app manifests root \| grep -c '^kind:'` (debe ser ≥ 1) y `git ls-tree -r --name-only origin/<rama> -- gitops/apps` |
+| El CLI `argocd` falla con `404 (Not Found)` y `404 page not found` en `text/plain` | El CLI usa gRPC (HTTP/2), pero la petición acaba en el puerto HTTP/1.1 del `argocd-server`. Puede ser (a) que falte el puerto h2c o (b) que la `GRPCRoute` comparta hostname con la `HTTPRoute` catch-all y Cilium ponga esta última primero en el virtualHost de Envoy | Verificar `servicePortHttp2` + `servicePortHttp2AppProtocol: kubernetes.io/h2c` y que la `GRPCRoute` use un hostname propio (`argocd-grpc.eljavatar.home`). Verificación rápida: `curl -sk --http2 --resolve argocd-grpc.eljavatar.home:443:192.168.0.70 -o /dev/null -w '%{http_code}' -X POST https://argocd-grpc.eljavatar.home/session.SessionService/Create -H 'Content-Type: application/grpc'` debe devolver `200` y no `404`. `--grpc-web` no sirve en Argo CD 3.x; alternativa local: `argocd login --core` |
+| Tras `helm uninstall` desaparecieron las Applications | Se instaló sin `crds.keep` | Mantener `crds.keep: true` (ya configurado) y respaldar el repositorio de GitOps |
+| Se borra la Application con `argocd app delete` y **reaparece** segundos o minutos después | La Application está declarada en Git y su dueño la recrea: `root` con `selfHeal: true` (App-of-Apps) o el `ApplicationSet` (ownerReference más generador) | Retirar el manifiesto de Git y hacer `push` **antes** de borrar; ver [Desinstalar un componente gestionado desde Git](#desinstalar-un-componente-gestionado-desde-git) |
+| Se borra el `application.yaml` de Git y **los recursos siguen en el clúster** | `root` tiene `prune: false`, y/o la Application no lleva el finalizer `resources-finalizer.argocd.argoproj.io` | `argocd app delete <app> --cascade --yes` después del `push`, o añadir el finalizer y activar `prune: true` |
+| Una Application del App-of-Apps falla con `failed to generate manifest ... open ... no such file or directory ... values.yaml` y queda `Unknown/Healthy` | Su source con `ref: values` apunta a una revisión distinta de la que sincroniza `root` (típicamente `main` mientras se prueba en `test/<tema>`), y en esa revisión el fichero de values no existe o está en otra ruta | Mover el componente al `ApplicationSet` (que sí recibe la reescritura de rama desde Terraform) y comprobar con `kubectl get application <app> -n argocd -o jsonpath='{.status.conditions}'` |
 
 
 ### Argo Rollouts
@@ -2848,7 +5112,7 @@ helm repo update
 # Instalamos (Chart 2.43.6 -> App v1.10.0)
 helm upgrade --install argo-rollouts argo/argo-rollouts --version 2.43.6 \
   -n argo-rollouts --create-namespace \
-  -f k8s/deployments/argo-rollouts-values.yaml
+  -f k8s/bootstrap/deployments/argo-rollouts-values.yaml
 ```
 
 Para validar la instalación:
@@ -2867,7 +5131,7 @@ kubectl argo rollouts list rollouts -n <namespace>
 
 > **Exposición opcional vía Gateway API:** el chart 2.43.6 soporta nativamente `dashboard.httproute`, por lo que en nuestro caso publicamos el dashboard bajo el Gateway existente en lugar de tener que hacer un `port-forward`, aprovechando el `internal CA` ya configurado (no olvidar agregar la ruta `argorollouts.eljavatar.home` al servicio DNS local que se tenga configurado o en su defecto, al archivo `/etc/hosts`).
 
-> **Nota de integración con Reloader:** si se gestionan Rollouts y se quiere reiniciar pods ante cambios de `ConfigMap`/`Secret`, activar `reloader.isArgoRollouts: true` en `k8s/deployments/reloader-values.yaml`.
+> **Nota de integración con Reloader:** si se gestionan Rollouts y se quiere reiniciar pods ante cambios de `ConfigMap`/`Secret`, activar `reloader.isArgoRollouts: true` en `k8s/bootstrap/deployments/reloader-values.yaml`.
 
 #### Accionables automatizados con base en Métricas de despliegue
 
@@ -2976,13 +5240,13 @@ helm repo update
 # Instalamos
 helm install reloader stakater/reloader --version 2.2.17 \
   --namespace reloader --create-namespace
-  -f k8s/deployments/reloader-values.yaml
+  -f k8s/bootstrap/deployments/reloader-values.yaml
 ```
 
 Para verificar la instalación, ejecutamos:
 
 ```sh
-kubectl get pods -n reloader
+kubectl get pods -n reloader -o wide
 
 kubectl logs -n reloader -l app=reloader-reloader
 ```
@@ -3095,7 +5359,7 @@ Teniendo esto claro, podemos confirmar si nuestro pod será afectado por el Desc
 kubectl get pod coredns-xxxxxxxxx-xxxxx -n kube-system -o yaml | grep -A 30 "affinity:"
 ```
 
-Lo cual en nuesro caso nos muestra una salida como la siguiente:
+Lo cual en nuestro caso nos muestra una salida como la siguiente:
 
 ```yaml
   affinity:
@@ -3159,7 +5423,7 @@ helm repo update
 # Instalamos
 helm upgrade --install descheduler descheduler/descheduler --version 0.36.0 \
   -n kube-system \
-  -f k8s/deployments/descheduler-values.yaml
+  -f k8s/bootstrap/deployments/descheduler-values.yaml
 ```
 
 Para validar la instalación podemos ejecutar lo siguiente:
@@ -3244,7 +5508,7 @@ helm repo update
 # Instalamos
 helm upgrade --install metrics-server metrics-server/metrics-server --version 3.13.1 \
   -n kube-system \
-  -f k8s/deployments/metrics-server-values.yaml
+  -f k8s/bootstrap/deployments/metrics-server-values.yaml
 ```
 
 Para verificar que se haya creado correctamente, ejecutamos lo siguiente:
@@ -3261,7 +5525,7 @@ kubectl top pods -A # O de un namespace en particular: kubectl top pods -n some-
 
 #### Discrepancias en la medición entre Proxmox y Metrics Server
 
-Si entramos a la interfaz web de Proxmox, e inspeccinamos cada una de las VMs, es posible que veamos valores de consumo de memoria RAM como los siguientes (entre paréntesis coloco la memoria RAM asignada a cada VM):
+Si entramos a la interfaz web de Proxmox, e inspeccinamos cada una de las VMs, es posible que veamos valores de consumo de memoria RAM como los siguientes (estos valores pueden cambiar según la cantidad de servicios/aplicaciones instalados en el clúster al momento de hacer la medición) (entre paréntesis coloco la memoria RAM asignada a cada VM):
 
 - cp-01 (3 GiB): 85.3% (2.5 GiB)
 - cp-02 (3 GiB): 79% (2.3 GiB)
@@ -3271,7 +5535,7 @@ Si entramos a la interfaz web de Proxmox, e inspeccinamos cada una de las VMs, e
 - worker-heavy-02 (12 GiB): 18.2% (2.1 GiB)
 - worker-ops-02 (11 GiB): 26.7% (2.9 GiB)
 
-Sin embargo, al ejecutar `kubectl topo nodes` podríamos ver valores como los siguientes:
+Sin embargo, al ejecutar `kubectl top nodes` podríamos ver valores como los siguientes:
 
 ```
 NAME              CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)
@@ -3320,6 +5584,43 @@ Ver a los Control Planes al 85% en Proxmox es perfectamente normal en Kubernetes
 - **¿A quién creerle?** Para saber si al clúster le queda espacio para meter algún servicio, debemos creerle siempre a `metrics-server` (o al servicio de observabilidad que configuremos para recolectar métricas de cAdvisor). Ellos nos dicen cuánta RAM física real le queda al sistema operativo para alojar procesos.
 
 - **¿Para qué sirve el dato de Proxmox entonces?** Nos sirve para medir el impacto real en el hardware de una Mini PC física (`pmx-01` y `pmx-02`). Nos dice que, aunque la VM tenga RAM libre por dentro, el hipervisor ya ha bloqueado y asignado esos gigabytes en los sockets de memoria física y no se los puede prestar a otra VM de Proxmox.
+
+
+### OpenFeature Operator
+
+El **OpenFeature Operator** (OFO) es un operador nativo de Kubernetes que expone banderas de funcionalidad (*feature flags*) a las aplicaciones. Su modo de funcionamiento consiste en inyectar un sidecar de **flagd** en los pods etiquetados, de modo que la aplicación pueda evaluar las banderas localmente por gRPC/HTTP sin acoplarse a un SDK externo. Los CRDs `FeatureFlag` y `FeatureFlagSource` definen las banderas y su origen de sincronización (Kubernetes, ficheros, HTTP, S3, etc.).
+
+Para este homelab se instala el chart `open-feature-operator` con los CRDs gestionados por el propio chart (son plantillas que Helm aplica automáticamente), una única réplica del controlador (para garantizar un solo reconciliador activo) y métricas expuestas de forma segura mediante `kube-rbac-proxy`, evitando cualquier dependencia del Prometheus Operator (dado que la observabilidad se hará con VictoriaMetrics y OpenObserve).
+
+> **Prerequisito:** el OpenFeature Operator requiere **cert-manager** en el clúster (ya instalado en secciones anteriores) para la gestión de los certificados del webhook de admisión.
+
+Para instalarlo ejecutamos lo siguiente:
+
+```sh
+# Agregamos el repositorio
+helm repo add openfeature https://open-feature.github.io/open-feature-operator/
+helm repo update
+
+# Instalamos (Chart v0.9.3 -> App v0.9.3)
+helm upgrade --install open-feature-operator openfeature/open-feature-operator --version 0.9.3 \
+  -n open-feature-operator-system --create-namespace \
+  -f k8s/bootstrap/deployments/open-feature-values.yaml
+```
+
+Para validar la instalación:
+
+```sh
+# Controlador
+kubectl get -n open-feature-operator-system deployment -o wide
+kubectl get -n open-feature-operator-system pods -o wide
+
+# CRDs registrados
+kubectl get crds | grep openfeature.dev
+```
+
+> **Métricas sin CRDs de Prometheus:** el chart no crea `ServiceMonitor`/`PodMonitor`; el manager publica sus métricas en `127.0.0.1:8080` y `kube-rbac-proxy` las sirve de forma autenticada en el puerto `8443`. Cuando se despliegue VictoriaMetrics, se podrá añadir un `VMServiceScrape` (CRD del VictoriaMetrics Operator) para recolectarlas sin depender del Prometheus Operator.
+
+> **Activación por aplicación:** para inyectar el sidecar `flagd` en un pod basta con anotar su Deployment con `openfeature.dev/enabled: "true"` y referenciar la `FeatureFlagSource` correspondiente.
 
 
 ### cAdvisor
@@ -3377,43 +5678,6 @@ Para no tener que usar comandos de terminal y poder visualizar dashboards reales
 Dependiendo de la herramienta de observabilidad que se desee implementar, la pieza encargada de automatizar esta recolección puede variar, por ejemplo, para el caso del stack de VictoriaMetrics la herramienta sería *VMAgent*, o para el caso del stack LGTMP de grafana (Loki, Grafana, Tempo, Mimir, Pyroscope) la herramienta sería *Alloy*.
 
 
-### OpenFeature Operator
-
-El **OpenFeature Operator** (OFO) es un operador nativo de Kubernetes que expone banderas de funcionalidad (*feature flags*) a las aplicaciones. Su modo de funcionamiento consiste en inyectar un sidecar de **flagd** en los pods etiquetados, de modo que la aplicación pueda evaluar las banderas localmente por gRPC/HTTP sin acoplarse a un SDK externo. Los CRDs `FeatureFlag` y `FeatureFlagSource` definen las banderas y su origen de sincronización (Kubernetes, ficheros, HTTP, S3, etc.).
-
-Para este homelab se instala el chart `open-feature-operator` con los CRDs gestionados por el propio chart (son plantillas que Helm aplica automáticamente), una única réplica del controlador (para garantizar un solo reconciliador activo) y métricas expuestas de forma segura mediante `kube-rbac-proxy`, evitando cualquier dependencia del Prometheus Operator (dado que la observabilidad se hará con VictoriaMetrics y OpenObserve).
-
-> **Prerequisito:** el OpenFeature Operator requiere **cert-manager** en el clúster (ya instalado en secciones anteriores) para la gestión de los certificados del webhook de admisión.
-
-Para instalarlo ejecutamos lo siguiente:
-
-```sh
-# Agregamos el repositorio
-helm repo add openfeature https://open-feature.github.io/open-feature-operator/
-helm repo update
-
-# Instalamos (Chart v0.9.3 -> App v0.9.3)
-helm upgrade --install open-feature-operator openfeature/open-feature-operator --version 0.9.3 \
-  -n open-feature-operator-system --create-namespace \
-  -f k8s/deployments/open-feature-values.yaml
-```
-
-Para validar la instalación:
-
-```sh
-# Controlador
-kubectl get -n open-feature-operator-system deployment -o wide
-kubectl get -n open-feature-operator-system pods -o wide
-
-# CRDs registrados
-kubectl get crds | grep openfeature.dev
-```
-
-> **Métricas sin CRDs de Prometheus:** el chart no crea `ServiceMonitor`/`PodMonitor`; el manager publica sus métricas en `127.0.0.1:8080` y `kube-rbac-proxy` las sirve de forma autenticada en el puerto `8443`. Cuando se despliegue VictoriaMetrics, se podrá añadir un `VMServiceScrape` (CRD del VictoriaMetrics Operator) para recolectarlas sin depender del Prometheus Operator.
-
-> **Activación por aplicación:** para inyectar el sidecar `flagd` en un pod basta con anotar su Deployment con `openfeature.dev/enabled: "true"` y referenciar la `FeatureFlagSource` correspondiente.
-
-
 ### Herramientas de Administración del Clúster de Kubernetes
 
 En esta pequeña sección, no voy a ahondar mucho en el tema, sin embargo, dejaré un breve resumen sobre algunas herramientas sobre las que he indagado.
@@ -3441,11 +5705,506 @@ El único escenario donde si se debería considerar la instalación de Headlamp 
 - **Acceso en Movimiento (SRE Portátil):** Si se quiere poder revisar la salud de las bases de datos desde el teléfono o fuera de la casa sin arrastrar el computador portátil con K9s (en mi caso mi Macbook), Headlamp expuesto tras `cloudflared` (Cloudflare Tunnel) con protección de Cloudflare Access nos daría una consola de administración visual completa desde cualquier navegador.
 - **Compartir el Clúster:** Si en algún momento otra persona va a colaborar con uno en el desarrollo de las aplicaciones de Java o Go, o se quisiera mostrar métricas a un tercero, con Headlamp se le podría crear un acceso web en lugar de comprometer la seguridad del clúster dándole un token de administración para su K9s local.
 
+---
+
 
 
 
 
 # Pruebas de Componentes y Configuraciones
+
+## Validación automática del clúster (`make validate-cluster`)
+
+Las validaciones de este README están repartidas por cada componente, y ejecutarlas a mano tras recreaciones de prueba del clúster acaba en que a la final se terminan omitiendo; [`scripts/validate-cluster.sh`](scripts/validate-cluster.sh) las agrupa en **una sola pasada de solo lectura** que devuelve `OK`/`FAIL`/`WARN`/`SKIP` por check, con el **ancla del README** de su troubleshooting cuando algo falla.
+
+```sh
+# Otorgamos permisos al script
+chmod +x scripts/validate-cluster.sh
+
+make validate-cluster            # ~90 comprobaciones en una pasada
+make validate-cluster-slow       # + connectivity test, chaos de la VIP, nginx y VSO e2e
+make validate-cluster-json       # salida machine-readable para CI
+```
+
+Contrato de códigos de salida: **`0`** todo correcto (puede haber `WARN`/`SKIP`), **`1`** algún `FAIL`, **`2`** no se puede hablar con el clúster (kubeconfig/contexto).
+
+### Relación con `make gitops-health`
+
+| Criterio | `make gitops-health` | `make validate-cluster` |
+|----------|----------------------|-------------------------|
+| Alcance | Solo las `Application` de Argo CD | Todo el clúster (red, TLS, secretos, storage, workloads) |
+| Salud | **Informativa**: avisa pero sale 0 | **Gate**: un `OutOfSync`/`Degraded` es `FAIL` |
+| Uso | Consulta rápida durante el día | Puerta tras `make tf-apply` o clonar el clúster |
+
+### Qué comprueba cada grupo
+
+| Grupo | Checks | Criterio de OK |
+|-------|--------|----------------|
+| `core` | `nodes-ready`, `nodes-schedulable`, `csr-approved`, `pods-healthy`, `psa-failedcreate`, `openebs-psa-label` | Nodos `Ready`; ninguna CSR sin aprobar; ningún pod en mal estado en los namespaces de plataforma; sin eventos `FailedCreate` por Pod Security; `ns/openebs` con `enforce=privileged` |
+| `crds` | `gateway-api`, `cilium`, `cert-manager`, `external-secrets`, `vso`, `openfeature`, `argoproj` | Todos los CRD esperados de cada grupo existen (lista explícita, no un `grep` suelto) |
+| `net` | `gatewayclass`, `gateway-programmed`, `gateway-listeners`, `ip-pool`, `l2-policy`, `cilium-status` | `ACCEPTED=True`, `PROGRAMMED=True` con IP asignada, cada listener programado, pool sin conflicto y con IPs libres, `cilium status` sin `Warning`/`Failure` |
+| `workloads` | una entrada por Deployment/StatefulSet/DaemonSet + `placement/*` + `metrics-api` | `readyReplicas == spec.replicas` (DaemonSet: `numberReady == nodos`); los pods caen en nodos cuyo nombre contiene el prefijo permitido (`ops*`, `apps*`…); `kubectl top nodes` responde |
+| `tls` | `clusterissuers`, `certificates-ready`, `certificates-expiry`, `trust-bundle`, `route-san-coverage` | Todos los `ClusterIssuer`/`Certificate` en `Ready=True`; ninguno expira en < 7 días; `cluster-trusted-ca` en todos los namespaces; **cada hostname de cada `HTTPRoute`/`GRPCRoute` cae en un listener y está cubierto por un SAN del certificado servido** |
+| `secrets` | `vso-connection`, `vso-authglobal`, `eso-ca-configmap`, `vso-ca-secret`, `vault-syncer-jobs` | `VaultConnection` `Healthy`/`Ready`; `VaultAuthGlobal` presente; el CA de Vault en ambos namespaces; todos los Jobs de `shared-ops` en `Complete` |
+| `storage` | `default-class`, `pvc-pending` | `openebs-hostpath` es la default; ninguna PVC en `Pending` |
+| `gitops` | `argocd-https`, `argocd-grpc`, `appproject`, `appset-generated`, `applications` | HTTPS y gRPC devuelven `200`; existe el `AppProject`; el `ApplicationSet` generó al menos una `Application`; todas `Synced`+`Healthy` |
+
+### Cómo detecta el error de un subdominio mal escrito
+
+El check `tls/route-san-coverage` existe por un fallo real: un `dnsNames` con `*.neobank.eljavatar.home` cuando el listener pedía `.org`. El certificado nunca llega a `Ready`, y además ningún listener acepta ese hostname. El script lo detecta en dos niveles:
+
+1. `tls/certificates-ready` marca el `Certificate` que no está `Ready` (el `dnsNames` incorrecto).
+2. `tls/route-san-coverage` recorre los hostnames de todas las rutas y verifica que **cada uno** intersecta con un listener del Gateway y que el certificado servido por SNI lo cubre (match exacto o wildcard de **un** nivel). La comprobación se hace contra el servidor real (`openssl s_client -servername`), no contra el manifiesto, así que también detecta que Cilium esté sirviendo el certificado equivocado.
+
+### Validaciones opt-in
+
+Deliberadamente fuera del camino rápido, porque son lentas o **modifican el clúster**:
+
+| Flag | Qué hace | Coste |
+|------|----------|-------|
+| `--with-connectivity` | `cilium connectivity test` | Decenas de minutos |
+| `--with-chaos` | [`tests/gateway-chaos-test.sh`](tests/gateway-chaos-test.sh): migra la IP flotante y mide la interrupción | Requiere `nc` y `jq`; corta el tráfico unos segundos |
+| `--with-app` | Aplica [`tests/playground-nginx.yaml`](tests/playground-nginx.yaml), espera el Deployment, valida `Welcome to nginx` en los dominios local y público (reintentando mientras Cilium programa la ruta) y borra el namespace al final del grupo | Crea y borra recursos |
+| `--with-vso-e2e` | Crea el namespace, aplica [`tests/vso-auth.yaml`](tests/vso-auth.yaml) (los `VaultAuth` que referencian los secretos) y [`tests/vso-secret.yaml`](tests/vso-secret.yaml), espera a que `vault-static-secret-playground` esté `Ready=True` y limpia | Crea y borra recursos; requiere que existan en Vault los KV `playground/nginx-app` y `demo` en Vault |
+
+> Los dos últimos flags comparten el namespace `playground`, y se puede usar uno sin el otro: `--with-vso-e2e` lo crea si no existe y **la limpieza del namespace se hace una sola vez, al final del grupo**, para que `--with-app` no se lleve por delante lo que necesita `--with-vso-e2e`. El orden obligatorio dentro del e2e de VSO es `vso-auth.yaml` **antes** de `vso-secret.yaml`: sin el `VaultAuth`, el `VaultStaticSecret` nunca pasa a `Ready`.
+
+### Detalles de implementación que conviene conocer
+
+- **Solo lectura por defecto:** ningún check crea, modifica ni borra nada.
+- **Sin `set -e`:** un check que falla se contabiliza y el resto sigue ejecutándose. Es la diferencia entre «el script te dice las 79 cosas» y «el script se detiene en la primera».
+- **Sin dependencias nuevas:** `kubectl`, `curl` y `openssl`. `cilium`, `nc` y `jq` solo se usan si existen; si no, el check pasa a `SKIP`.
+- **Nada hardcodeado:** la IP del Gateway se lee de `status.addresses[0].value` y los hostnames de las rutas, así que el script sigue siendo válido si cambia el pool de IPs o el dominio.
+- **Placement por prefijo:** `ops*` matchea `worker-ops-02` y también un futuro `worker-ops-03`, porque el `nodeSelector` es por label y el pod puede caer en cualquiera de los nodos de ese rol.
+- **Componentes condicionales:** si `use_prod_domain=false` no existe el listener público ni su certificado, y esos checks pasan a `SKIP` en lugar de `FAIL`.
+- **Añadir un check:** crear una función `check_*`, llamarla desde su grupo y decidir el veredicto con `ok`/`warn`/`fail`/`skip`. Los datos repetitivos (réplicas, placement, CRDs) están en tablas `id|ns|...` al principio de cada grupo, así que añadir un componente es una línea.
+
+---
+
+
+### Otros componentes según el caso de uso
+
+Este Homelab deja el clúster en el estado que considero mínimo para estar "ready to work": red y borde (Cilium, CoreDNS, Gateway API, cloudflared), confianza TLS (cert-manager, trust-manager, CA interna), secretos fuera de Git (Vault + ESO/VSO), almacenamiento local (OpenEBS), entrega continua (Argo CD + ApplicationSet + Argo Rollouts), ajuste de capacidad básico (metrics-server, HPA, descheduler), feature flags (OpenFeature Operator), actualizar secrets/configmaps sin causar indisponibilidad (reloader) y validación automática ([`scripts/validate-cluster.sh`](scripts/validate-cluster.sh)).
+
+Muchas organizaciones, sin embargo, necesitan **más** desde el bootstrap: dependerá de si gestionan varios clústeres, de si tienen equipos de desarrollo a los que sirven, del sector (regulación) o de si operan cargas con estado. Esta sección es un catálogo de **necesidades** que este clúster **no** cubre, con la herramienta que mejor las resuelve y sus alternativas. **Ninguno de estos componentes está instalado aquí**: se documentan como referencia para quien llegue con otro caso de uso.
+
+> **Sobre la madurez de los proyectos:** la lista prioriza proyectos del ecosistema CNCF, que abarca niveles *Graduated*, *Incubating* y *Sandbox*, y cambian con el tiempo. En lugar de fijar el nivel de cada uno (un estado que puede cambiar en meses), se indica si es proyecto CNCF y se enlaza al [landscape oficial](https://landscape.cncf.io) para consultar su estado actual. Cuando una herramienta **no** es CNCF se indica explícitamente.
+>
+> **Sobre el consumo de recursos:** las cifras son **órdenes de magnitud** para un clúster pequeño (decenas de pods, 3-7 nodos) con los *requests* típicos de cada chart. Los controladores que cachean objetos de la API (Kyverno, Gatekeeper, Velero, OpenCost) escalan con el **número de pods y CRs**, y los que corren por nodo (Falco, agentes de malla, OSDs) escalan con el **número de nodos y discos**.
+
+#### Índice de necesidades
+
+1. [Guardrails de admisión más allá de PSA](#1-guardrails-de-admisi%C3%B3n-ir-m%C3%A1s-all%C3%A1-de-psa) — Kyverno
+2. [Copias de seguridad y recuperación del clúster](#2-copias-de-seguridad-y-recuperaci%C3%B3n-del-cl%C3%BAster) — Velero
+3. [Detección de amenazas en tiempo de ejecución](#3-detecci%C3%B3n-de-amenazas-en-tiempo-de-ejecuci%C3%B3n) — Falco
+4. [Escaneo de vulnerabilidades y auditoría de configuración](#4-escaneo-de-vulnerabilidades-y-auditor%C3%ADa-de-configuraci%C3%B3n) — Trivy Operator
+5. [Firma y procedencia de artefactos](#5-firma-y-procedencia-de-artefactos-supply-chain) — Sigstore / cosign
+6. [Autoscaling de cargas por eventos](#6-autoscaling-de-cargas-por-eventos) — KEDA
+7. [Aprovisionamiento y escalado de nodos](#7-aprovisionamiento-y-escalado-de-nodos) — Cluster API
+8. [Almacenamiento replicado, snapshots y RWX](#8-almacenamiento-replicado-con-snapshots-y-rwx) — Rook-Ceph
+9. [Registro de imágenes privado](#9-registro-de-im%C3%A1genes-privado) — Harbor
+10. [Multi-tenancy por equipos](#10-multi-tenancy-por-equipos) — Capsule
+11. [DNS automático de los servicios publicados](#11-dns-autom%C3%A1tico-para-los-servicios-publicados) — ExternalDNS
+12. [Identidad criptográfica de las cargas (SPIFFE)](#12-identidad-criptogr%C3%A1fica-de-las-cargas-de-trabajo-spiffe) — SPIRE
+13. [Malla de servicios, mTLS y control L7](#13-malla-de-servicios-mtls-y-control-de-tr%C3%A1fico-l7) — Istio / Linkerd
+14. [Promoción de artefactos entre entornos](#14-promoci%C3%B3n-de-artefactos-entre-entornos) — Kargo
+15. [Gestión de varios clústeres](#15-gesti%C3%B3n-de-varios-cl%C3%BAsteres) — Karmada
+16. [Ingeniería del caos](#16-ingenier%C3%ADa-del-caos) — Chaos Mesh
+17. [Visibilidad de coste y right-sizing](#17-visibilidad-de-coste-y-right-sizing) — OpenCost
+18. [Procesamiento batch, colas y cuotas](#18-procesamiento-batch-colas-y-cuotas-de-trabajo) — Kueue
+19. [Portal de autoservicio para los equipos](#19-portal-de-autoservicio-para-los-equipos) — Backstage
+20. [Conformidad del clúster](#20-conformidad-del-cl%C3%BAster) — Sonobuoy
+
+Y dos apartados de cierre: [propósitos deliberadamente fuera de esta lista](#prop%C3%B3sitos-deliberadamente-fuera-de-esta-lista) y [cómo decidir qué instalar](#c%C3%B3mo-decidir-qu%C3%A9-instalar-y-qu%C3%A9-no).
+
+#### 1. Guardrails de admisión: ir más allá de PSA
+
+**En qué consiste la necesidad:** Un *admission controller* de políticas evalúa cada recurso **antes** de que se persista en etcd y puede validarlo, mutarlo o generar otros recursos. La necesidad surge cuando la organización tiene convenciones que el clúster debe hacer cumplir por sí mismo: prohibir `:latest`, exigir `resources.requests` y `limits`, restringir registros de imágenes permitidos, exigir labels de coste/propietario, generar automáticamente una `NetworkPolicy` deny-all o una `ResourceQuota` por namespace, o verificar que la imagen está firmada.
+
+**Por qué conviene cubrirla en el clúster:** Es la única forma de que una convención se cumpla **sin depender de la disciplina humana**. Sin políticas de admisión, el revisor del PR se convierte en el motor de políticas: lento, inconsistente y sin registro.
+
+**Qué implica no cubrirla.** PSA (lo que ya tenemos) solo evalúa campos del `podSpec` en tres niveles cerrados: no puede exigir labels, ni recursos, ni registros, ni firmas, ni reglas que crucen objetos. Las desviaciones aparecen mucho después (una factura, una auditoría, un incidente) y corregirlas cuesta un rediseño en lugar de un rechazo en el `apply`.
+
+**Dónde es crítica o casi indispensable:** Clústeres multi-equipo o multi-tenant; sectores regulados (PCI-DSS, HIPAA, SOC 2) donde hay que demostrar controles; plataformas internas que sirven a muchos desarrolladores; cualquier organización que ya haya sufrido "el `deployment` que se comió la memoria del nodo".
+
+**Por qué no lo cubre el stack actual:** PSA es un conjunto fijo de controles de seguridad del pod; no es extensible ni puede validar imágenes, labels o cuotas.
+
+**Herramienta principal:** **Kyverno** (proyecto CNCF, *Graduated* desde marzo de 2026) — motor de políticas nativo de Kubernetes: las políticas son YAML, sin lenguaje nuevo, y cubre validación, mutación, generación de recursos, verificación de firmas de imágenes y reportes de cumplimiento. [Sitio](https://kyverno.io) · [GitHub](https://github.com/kyverno/kyverno) · [ArtifactHub](https://artifacthub.io/packages/helm/kyverno/kyverno).
+
+*Consumo orientativo:* ~250-800 mCPU y ~256 MiB-1 GiB (3 controladores: admission, background y reports). Crece con el número de pods evaluados y con los reportes que se retengan.
+
+**Alternativas:** [OPA Gatekeeper](https://open-policy-agent.github.io/gatekeeper) (políticas en Rego, más potente y más curva de aprendizaje) y [Kubewarden](https://www.kubewarden.io) (políticas compiladas a WebAssembly, multi-lenguaje).
+
+#### 2. Copias de seguridad y recuperación del clúster
+
+**En qué consiste la necesidad:** Poder restaurar **el estado del clúster y los datos de los volúmenes** ante un borrado accidental, una migración o un desastre: manifiestos, CRs, Secrets y el contenido de las `PersistentVolumeClaim`.
+
+**Por qué conviene cubrirla en el clúster:** GitOps respalda los manifiestos (están en Git) y Talos respalda etcd, pero **ninguno respalda los datos**: un `PersistentVolumeClaim` borrado o un nodo perdido se lleva la base de datos por delante. La copia es lo que convierte "recrear el clúster" en un procedimiento rutinario en lugar de un incidente.
+
+**Qué implica no cubrirla:** No hay objetivo de recuperación posible: ni RPO (cuántos datos se pueden perder) ni RTO (cuántos se tardaría en volver). El primer borrado accidental de un namespace con una DB es irrecuperable, y las auditorías suelen pedir evidencias de backup y **pruebas de restauración**.
+
+**Dónde es crítica o casi indispensable:** Cualquier carga con estado (bases de datos, colas con persistencia, registros de objetos), sectores regulados, y organizaciones que ofrecen un SLA. En un homelab es recomendable en cuanto hay algo que no se pueda regenerar.
+
+**Por qué no lo cubre el stack actual:** OpenEBS en modo `hostpath` guarda los datos en el nodo; no hay replicación ni copia fuera de él, y `terraform destroy` no toca los PVCs pero sí puede perder el nodo.
+
+**Herramienta principal:** **Velero** — copia y restaura recursos del clúster y volúmenes (con complementos de *snapshot* o con Restic/Kopia para *file-level*), permite migrar entre clústeres y programar retenciones. [Sitio](https://velero.io) · [GitHub](https://github.com/vmware-tanzu/velero) · [ArtifactHub](https://artifacthub.io/packages/helm/vmware-tanzu/velero).
+
+*Consumo orientativo:* ~100-500 mCPU y ~128-512 MiB fijos; el coste real son los Jobs de backup y el almacenamiento del repositorio (S3/NFS).
+
+**Alternativas:** [K8up](https://k8up.io) (backups con Restic y CRDs, más ligero), [VolSync](https://volsync.readthedocs.io) (replicación de PVCs entre clústeres con Restic/Syncthing) y [Kanister](https://kanister.io) (backups *application-consistent* de bases de datos).
+
+#### 3. Detección de amenazas en tiempo de ejecución
+
+**En qué consiste la necesidad:** Observar lo que los contenedores **hacen** una vez arrancados (llamadas al sistema, ejecución de shells, escritura en rutas del sistema, conexiones salientes inesperadas) y alertar cuando ese comportamiento se sale de lo esperado.
+
+**Por qué conviene cubrirla en el clúster:** Las políticas de admisión son **preventivas**: deciden qué se despliega, no qué ocurre después. Un pod perfectamente compliant (imagen firmada, non-root, `drop: ALL`) puede estar ejecutando una vulnerabilidad y lanzar un `curl | sh` o un minero de criptomonedas.
+
+**Qué implica no cubrirla:** No hay detección de compromiso: nos enteraríamos por la factura del proveedor, por un ransomware o por un aviso externo. Tampoco hay evidencias para un análisis forense (qué proceso, en qué pod, cuándo).
+
+**Dónde es crítica o casi indispensable:** Cargas expuestas a Internet, cualquier organización con un SOC o con obligación de detección (NIS2, ISO 27001), y clústeres que ejecutan código de terceros o imágenes de muchos equipos.
+
+**Por qué no lo cubre el stack actual:** Cilium aporta *visibilidad de red* (Hubble) y aplica políticas L3/L4, pero no analiza syscalls ni comportamiento de procesos.
+
+**Herramienta principal:** **Falco** (proyecto CNCF, *Graduated*) — detección de amenazas basada en reglas sobre eventos de kernel (eBPF o módulo) y plugins de Kubernetes/audit; alerta a stdout, gRPC, syslog, Slack, etc. [Sitio](https://falco.org) · [GitHub](https://github.com/falcosecurity/falco) · [ArtifactHub](https://artifacthub.io/packages/helm/falcosecurity/falco).
+
+*Consumo orientativo:* al ser un DaemonSet, ~50-150 mCPU y ~256-512 MiB **por nodo**; se suma Falcosidekick si se enrutan alertas.
+
+**Alternativas:** [Tetragon](https://tetragon.io) (eBPF, del proyecto Cilium, con *enforcement* además de detección) y [KubeArmor](https://kubearmor.io) (políticas de *least privilege* a nivel de proceso, también eBPF/AppArmor).
+
+#### 4. Escaneo de vulnerabilidades y auditoría de configuración
+
+**En qué consiste la necesidad:** Saber, de forma continua, qué CVEs (*Common Vulnerabilities and Exposures*) tienen las imágenes que están corriendo y si los recursos del clúster cumplen una línea base (CIS Kubernetes Benchmark, configuración de `securityContext`, RBAC excesivo).
+
+**Por qué conviene cubrirla en el clúster:** Una imagen "limpia" en el momento del build deja de serlo la semana siguiente. Escanear en CI cubre el artefacto, pero no lo que realmente está desplegado ni los hallazgos que aparecen después.
+
+**Qué implica no cubrirla:** Se despliegarían imágenes con vulnerabilidades conocidas sin saberlo, y no hay inventario para responder a "¿tenemos `log4j` en producción?" en menos de un día. En una auditoría, la respuesta "lo miramos a mano" no se sostiene.
+
+**Dónde es crítica o casi indispensable:** Sectores regulados con plazos de parcheo, organizaciones que publican software, y cualquier equipo con más de un puñado de imágenes.
+
+**Por qué no lo cubre el stack actual:** no hay escaneo continuo; el `Trivy`/`grype` de CI no ve lo desplegado ni la configuración del clúster.
+
+**Herramienta principal:** **Trivy Operator** (de Aqua Security; **no** es proyecto CNCF, aunque Trivy sí está muy extendido) — escanea imágenes, configuración de workloads, RBAC y expone los resultados como CRDs para consultarlos o exportarlos. [GitHub](https://github.com/aquasecurity/trivy-operator) · [ArtifactHub](https://artifacthub.io/packages/helm/trivy-operator/trivy-operator).
+
+*Consumo orientativo:* operador ~100-200 mCPU y ~256-512 MiB; el coste real son los **Jobs de escaneo** (picos de CPU al escanear todas las imágenes y al actualizar la base de datos de CVEs).
+
+**Alternativas:** [Kubescape](https://kubescape.io) (CNCF, con postura de seguridad y CIS integrados), [kube-bench](https://github.com/aquasecurity/kube-bench) (solo CIS del nodo/control plane) y [Polaris](https://polaris.docs.fairwinds.com) (validación de buenas prácticas como *webhook*).
+
+#### 5. Firma y procedencia de artefactos (supply chain)
+
+**En qué consiste la necesidad:** Poder demostrar que la imagen que se despliega **es la que se construyó** en un pipeline, por quién y a partir de qué código: firma criptográfica, atestaciones de *build* (metadatos con detalles sobre el proceso de construcción) y SBOM (librerías, módulos y código de terceros que componen el artefacto).
+
+**Por qué conviene cubrirla en el clúster:** Kubernetes no tiene concepto de "imagen de confianza": `image: repo/app:1.4.2` es solo una cadena. Si alguien con acceso al registro publica una imagen distinta bajo la misma etiqueta, el clúster la ejecutará sin protestar. La firma convierte esa cadena en una decisión verificable en la admisión.
+
+**Qué implica no cubrirla:** No hay forma de distinguir una imagen propia de una réplica maliciosa o de un *tag* sobrescrito. Es la brecha clásica entre "el build es seguro" y "lo que corre es lo que se construyó", y cada vez más requisitos (Órdenes ejecutivas, SLSA, clientes enterprise) piden evidencias de procedencia.
+
+**Dónde es crítica o casi indispensable:** Organizaciones que distribuyen software a clientes, entornos regulados, y clústeres que consumen imágenes de varios equipos o de terceros.
+
+**Por qué no lo cubre el stack actual:** no hay firma ni verificación; el registro público tampoco la exige.
+
+**Herramienta principal:** **Sigstore / cosign** (**no** es CNCF: Sigstore es un proyecto de OpenSSF) — firma sin gestión de claves (con OIDC y transparencia) y verificación en la admisión, normalmente **junto a Kyverno** (`verifyImages`) o Gatekeeper. [Sitio](https://www.sigstore.dev) · [GitHub](https://github.com/sigstore/cosign).
+
+*Consumo orientativo:* `cosign` es una **CLI**: 0 recursos en el clúster. Si se usa un controlador de políticas de firma, ~50-150 mCPU y ~128-256 MiB.
+
+**Alternativas:** [Notary Project / Notation](https://notaryproject.dev) (CNCF) y [TUF](https://theupdateframework.io) (CNCF) para la raíz de confianza de las actualizaciones; en la práctica, la verificación se hace con Kyverno o Gatekeeper.
+
+#### 6. Autoscaling de cargas por eventos
+
+**En qué consiste la necesidad:** Escalar réplicas en función de una señal **externa** al pod: longitud de una cola, *lag* de un consumidor de Kafka, peticiones por segundo en un endpoint, jobs pendientes en un sistema batch.
+
+**Por qué conviene cubrirla en el clúster:** El HPA nativo escala por CPU/memoria (o métricas custom vía *adapter*), y un consumidor de colas suele estar **ocioso en CPU mientras la cola crece**. Sin esa señal, o se sobredimensiona de forma permanente (coste) o se acumula retraso (latencia e incumplimiento de SLA).
+
+**Qué implica no cubrirla:** Pagar por capacidad que no se usa o incumplir SLOs en los picos; y en el caso de consumidores de colas, *backlogs* que crecen más rápido de lo que se drenan.
+
+**Dónde es crítica o casi indispensable:** Arquitecturas event-driven, procesamiento batch/nocturno, y organizaciones con coste cloud sensible, donde el sobredimensionamiento se factura cada mes.
+
+**Por qué no lo cubre el stack actual:** metrics-server solo expone CPU/memoria de pods y nodos; no hay adaptador de métricas externas.
+
+**Herramienta principal:** **KEDA** (proyecto CNCF, *Graduated*) — *scalers* para decenas de fuentes (Kafka, RabbitMQ, Redis Streams, Prometheus, cron, colas cloud) y capacidad de escalar **a cero**. [Sitio](https://keda.sh) · [GitHub](https://github.com/kedacore/keda) · [ArtifactHub](https://artifacthub.io/packages/helm/kedacore/keda).
+
+*Consumo orientativo:* ~80-200 mCPU y ~128-256 MiB en total (operador + servidor de métricas + adaptador).
+
+**Alternativas:** HPA nativo con adaptadores de métricas custom (Prometheus Adapter) y [VPA](https://github.com/kubernetes-sigs/vertical-pod-autoscaler) para el ajuste de *requests* (que es complementario: right-sizing y no elasticidad).
+
+#### 7. Aprovisionamiento y escalado de nodos
+
+**En qué consiste la necesidad:** Gestionar el **ciclo de vida de las máquinas** de forma declarativa desde el propio clúster: crear nodos cuando faltan, eliminarlos cuando sobran, y orquestar sus upgrades.
+
+**Por qué conviene cubrirla en el clúster:** Terraform es excelente para el estado inicial, pero es *imperativo por apply*: no reacciona a un `Pending` por falta de capacidad. Cuando la demanda varía, la alternativa es que un humano mire métricas y ejecute un `apply`.
+
+**Qué implica no cubrirla:** Planificación de capacidad manual y permanente: o sobra hardware (coste) o los pods se quedan `Pending` en el peor momento. Los upgrades de nodos se convierten en una operación artesanal.
+
+**Dónde es crítica o casi indispensable:** Clústeres cloud con demanda elástica, plataformas que sirven muchos equipos y cualquier entorno donde añadir capacidad deba ser automático (o donde el coste de tenerla de más sea relevante).
+
+**Por qué no lo cubre el stack actual:** las VMs de Talos se crean con Terraform ([`terraform/modules/talos-node`](terraform/modules/talos-node)) y nadie reacciona a la falta de capacidad.
+
+**Herramienta principal:** **Cluster API** (proyecto del ecosistema Kubernetes/CNCF) — CRDs para declarar `Cluster`, `Machine` y `MachineDeployment`, con *providers* de infraestructura (Proxmox, AWS, vSphere, etc.) y de *bootstrap* (Talos tiene el suyo). [Sitio](https://cluster-api.sigs.k8s.io) · [GitHub](https://github.com/kubernetes-sigs/cluster-api).
+
+*Consumo orientativo:* ~100-300 mCPU y ~256-512 MiB por los gestores del *management cluster*. No hay chart en ArtifactHub (se instala con `clusterctl`).
+
+**Alternativas:** [Karpenter](https://karpenter.sh) (aprovisionamiento directo y rápido, orientado a cloud) y [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) (el clásico, atado a grupos de nodos del proveedor).
+
+#### 8. Almacenamiento replicado, con snapshots y RWX
+
+**En qué consiste la necesidad:** Que el dato sobreviva a la pérdida de un nodo y que pueda montarse en **lectura/escritura desde varios pods** (`ReadWriteMany`), además de snapshots y clones consistentes.
+
+**Por qué conviene cubrirla en el clúster:** El almacenamiento local es rápido y barato, pero **ata el dato al nodo**. En cuanto hay una base de datos o un servicio con varias réplicas que comparten ficheros, el almacenamiento local deja de servir.
+
+**Qué implica no cubrirla:** Si el nodo que tiene el volumen se cae, los pods de ese volumen no pueden arrancar en otro (o arrancan sin datos). No hay RWX, así que muchas aplicaciones con estado solo admiten una réplica. Y no hay snapshots: el "backup" es copiar ficheros a mano.
+
+**Dónde es crítica o casi indispensable:** Plataformas con cargas con estado de verdad (bases de datos, registros de artefactos, sistemas de ficheros compartidos), sectores regulados, y cualquier clúster con requisitos de continuidad.
+
+**Por qué no lo cubre el stack actual:** OpenEBS en modo `hostpath` es **almacenamiento local del nodo**: sin replicación, sin RWX y con snapshots limitados.
+
+**Herramienta principal:** **Rook-Ceph** (proyecto CNCF, *Graduated*) — operador de Ceph que ofrece block (`RWO`), filesystem (`RWX`) y object (`S3`) sobre discos dedicados, con auto-reparación, snapshots y replicación. [Sitio](https://rook.io) · [GitHub](https://github.com/rook/rook) · [ArtifactHub](https://artifacthub.io/packages/helm/rook-release/rook-ceph).
+
+*Consumo orientativo:* **el más caro de la lista**: mon/mgr ~1-1,5 GiB en total, y cada OSD ~2-4 GiB de RAM (`osd_memory_target`), además de discos dedicados. En un homelab de 2 máquinas es difícil de justificar.
+
+**Alternativas:** [Longhorn](https://longhorn.io) (CNCF, réplica a nivel de bloque sobre discos de los nodos, mucho más simple en homelab) y [Piraeus](https://piraeus.io) (operador de DRBD, RWX ligero).
+
+#### 9. Registro de imágenes privado
+
+**En qué consiste la necesidad:** Un registro propio para las imágenes de la organización, con control de acceso, retención, escaneo, firmas y replicación entre ubicaciones.
+
+**Por qué conviene cubrirla en el clúster:** Depender de un registro público implica límites de descarga, disponibilidad ajena y exposición de lo que se publica. Un registro interno permite además aplicar políticas de "solo imágenes de este registro" con sentido.
+
+**Qué implica no cubrirla:** *Rate limits* que rompen un despliegue, dependencia de un tercero en el camino crítico, y ninguna capacidad de auditar quién subió qué.
+
+**Dónde es crítica o casi indispensable:** Entornos *air-gapped* o con restricción de salida a Internet, sectores regulados, y organizaciones con muchos equipos publicando imágenes.
+
+**Por qué no lo cubre el stack actual:** se usan registros públicos (Docker Hub, GHCR, quay) directamente.
+
+**Herramienta principal:** **Harbor** (proyecto CNCF, *Graduated*) — registro OCI con RBAC por proyecto, escaneo con Trivy, firma (cosign/Notation), replicación y *proxy cache* de registros upstream. [Sitio](https://goharbor.io) · [GitHub](https://github.com/goharbor/harbor) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=harbor).
+
+*Consumo orientativo:* ~800 mCPU-2 GiB sumando core, jobservice, registry, PostgreSQL y Redis (en producción se externalizan la BD y el almacenamiento de objetos).
+
+**Alternativas:** [Zot](https://zotregistry.io) (CNCF, registro OCI ligero y *OCI-native*) y [Distribution](https://github.com/distribution/distribution) (el registro de referencia, mínimo pero sin RBAC ni escaneo).
+
+#### 10. Multi-tenancy por equipos
+
+**En qué consiste la necesidad:** Dar a cada equipo un espacio con sus namespaces, cuotas, políticas de red y permisos ("un clúster propio" desde su punto de vista) **sin** darle acceso de administrador al clúster real.
+
+**Por qué conviene cubrirla en el clúster:** RBAC es demasiado granular para gestionarlo equipo a equipo (roles, bindings, nombres únicos) y los namespaces por sí solos no aportan cuotas ni políticas. Sin una capa de tenancy, cada alta de equipo es una tarea manual del administrador.
+
+**Qué implica no cubrirla:** Un equipo puede consumir recursos de otro, colisionar en nombres de CRDs o namespaces, y el RBAC crece hasta ser inmanejable. La plataforma se convierte en un cuello de botella humano.
+
+**Dónde es crítica o casi indispensable:** Plataformas internas que sirven a varios equipos de desarrollo, organizaciones con separación por cliente (SaaS) y cualquier escenario donde el clúster sea compartido entre áreas con requisitos distintos.
+
+**Por qué no lo cubre el stack actual:** hay namespaces, RBAC y cuotas nativas, pero el alta y el aislamiento se hacen a mano y no hay plantilla de "tenant".
+
+**Herramienta principal:** **Capsule** (proyecto CNCF) — define `Tenant` como CRD y crea por uno los namespaces, cuotas, `NetworkPolicy`, `LimitRange` y RBAC del equipo, permitiendo que cada tenant gestione sus propios namespaces sin ver los de otros. [Sitio](https://capsule.clastix.io) · [GitHub](https://github.com/projectcapsule/capsule) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=capsule).
+
+*Consumo orientativo:* ~50-150 mCPU y ~128-256 MiB, con un único Deployment.
+
+**Alternativas:** [vCluster](https://www.vcluster.com) (clúster virtual con su propio API server, aislamiento mucho mayor a cambio de más recursos), [HNC](https://github.com/kubernetes-sigs/hierarchical-namespaces) (jerarquía de namespaces con herencia de políticas) y `ResourceQuota`+`LimitRange`+RBAC hechos a mano.
+
+#### 11. DNS automático para los servicios publicados
+
+**En qué consiste la necesidad:** que el registro DNS de cada `HTTPRoute`/`Service` que se publica exista **sin intervención humana**, y que desaparezca cuando el recurso desaparece. Con dominios propios, cada servicio nuevo necesita un registro (A, CNAME o TXT) que hoy se crea a mano en Cloudflare o en el DNS local.
+
+**Por qué conviene cubrirla en el clúster:** el DNS pasa a formar parte del despliegue declarativo. El alta de un servicio deja de depender de que alguien recuerde crear el registro, y el borrado no deja huérfanos apuntando a una IP que ya no existe.
+
+**Qué implica no cubrirla:** registros desactualizados (el clásico "funciona en el clúster pero no resuelve"), errores de dedo en nombres, y un paso manual en cada entrega que se olvida justo cuando hay prisa. Con muchos servicios, la tabla de DNS se vuelve inmantenible.
+
+**Dónde es crítica o casi indispensable:** organizaciones con decenas de servicios y varios dominios, equipos que dan de alta entornos efímeros (previews por PR) y cualquier plataforma con autoservicio.
+
+**Por qué no lo cubre el stack actual:** los registros de `eljavatar.home` y `.org` se crean a mano (DNS local y Cloudflare); el Gateway publica el hostname, pero nadie crea el registro.
+
+**Herramienta principal:** **ExternalDNS** (proyecto de `kubernetes-sigs`, parte del ecosistema Kubernetes; no es un proyecto CNCF) — observa `Ingress`, `Service` y `HTTPRoute` y sincroniza los registros con decenas de proveedores (Cloudflare, Route 53, Pi-hole, RFC2136, etc.), con *ownership* por TXT para no borrar lo que no gestiona. [Sitio](https://kubernetes-sigs.github.io/external-dns) · [GitHub](https://github.com/kubernetes-sigs/external-dns) · [ArtifactHub](https://artifacthub.io/packages/helm/external-dns/external-dns).
+
+*Consumo orientativo:* ~30-80 mCPU y ~64-128 MiB; escala con el número de recursos observados, no con el tráfico.
+
+**Alternativas:** [cert-manager](https://cert-manager.io) con DNS-01 ya escribe TXT en el proveedor (solo para desafíos), y los *controllers* propios de cada proveedor (por ejemplo el de Cloudflare) cubren casos muy concretos.
+
+#### 12. Identidad criptográfica de las cargas de trabajo (SPIFFE)
+
+**En qué consiste la necesidad:** que cada workload tenga una **identidad verificable y efímera** (un certificado con su `SPIFFE ID`, por ejemplo `spiffe://cluster/ns/pagos/sa/api`), emitida por el clúster y rotada automáticamente, en lugar de compartir tokens o contraseñas estáticas entre servicios.
+
+**Por qué conviene cubrirla en el clúster:** es la base del *zero trust* interno: permite que un servicio demuestre **quién es** a otro sin depender de la red, y que la autorización se exprese sobre identidades en lugar de IPs. También resuelve el problema de identidad **entre clústeres** (un SPIFFE ID es portable, una ServiceAccount no).
+
+**Qué implica no cubrirla:** los servicios se autentican con secretos estáticos que hay que distribuir, rotar y auditar; cualquier pod que robe ese secreto suplanta al servicio. Y no hay forma de autorizar por identidad de workload en mallas o gateways.
+
+**Dónde es crítica o casi indispensable:** arquitecturas de microservicios con requisitos de *zero trust*, entornos multi-clúster o multi-nube, y sectores donde se exige autenticación mutua y rotación de credenciales.
+
+**Por qué no lo cubre el stack actual:** cert-manager emite certificados **de servidor** y Vault emite credenciales para aplicaciones que saben pedirlas, pero no hay una identidad de workload emitida y rotada por el clúster.
+
+**Herramienta principal:** **SPIRE** (proyecto CNCF) — implementación de SPIFFE: *server* que actúa como CA y *agents* (DaemonSet) que atestan los pods mediante sus ServiceAccounts y les entregan certificados de corta duración por la Workload API. [Sitio](https://spiffe.io) · [GitHub](https://github.com/spiffe/spire) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=spire).
+
+*Consumo orientativo:* ~100-250 mCPU y ~128-256 MiB para el server, más ~50-100 mCPU y ~64-128 MiB **por nodo** del agente.
+
+**Alternativas:** [cert-manager](https://cert-manager.io) con el emisor de Vault PKI (más simple, pero la identidad se ata a un secreto que la app debe montar) y las mallas de servicios, que traen su propia identidad (Istio con su CA, Linkerd con su emisor) aunque no son portables entre implementaciones.
+
+#### 13. Malla de servicios: mTLS y control de tráfico L7
+
+**En qué consiste la necesidad:** cifrado mutuo **entre** servicios, autorización a nivel de petición (método, path, cabeceras) y control fino del tráfico: *retries*, *timeouts*, *circuit breaking*, reparto por porcentaje y *mirroring*.
+
+**Por qué conviene cubrirla en el clúster:** Cilium da red, políticas L3/L4 y borde L7, pero **no** autenticación mutua por identidad ni políticas por ruta entre pods arbitrarios. Cuando el requisito es "que el servicio A solo pueda llamar a `GET /health` del servicio B", la respuesta deja de ser red y pasa a ser malla.
+
+**Qué implica no cubrirla:** tráfico interno en claro entre pods (en un clúster plano, cualquiera puede leerlo si compromete un nodo), autorización solo por IP/puerto, y resiliencia delegada a la aplicación (cada equipo implementando sus *retries*).
+
+**Dónde es crítica o casi indispensable:** entornos con requisitos de *zero trust* (PCI-DSS exige cifrado interno segmentado), plataformas con muchos equipos donde la comunicación entre servicios debe auditarse, y arquitecturas de microservicios grandes.
+
+**Por qué no lo cubre el stack actual:** Cilium cubre L3/L4 y el borde; no hay mTLS por identidad de workload ni políticas L7 entre pods.
+
+**Herramienta principal:** **Istio** (proyecto CNCF, *Graduated*) — mTLS automático, autorización L7, *traffic management* avanzado y modo *ambient* (sin sidecar, con `ztunnel` por nodo) que reduce mucho el coste. [Sitio](https://istio.io) · [GitHub](https://github.com/istio/istio) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=istio).
+
+*Consumo orientativo:* `istiod` ~300-500 mCPU y ~512 MiB-1 GiB (x2 en HA); el coste dominante es el *data plane*: ~100 mCPU y ~128 MiB **por pod** con sidecar, o ~100 mCPU y ~128 MiB **por nodo** en modo ambient.
+
+**Alternativas:** [Linkerd](https://linkerd.io) (CNCF, *Graduated*; mucho más simple y ligero, ~20 mCPU y ~64 MiB por proxy, a cambio de menos funcionalidad L7) y el *service mesh* de Cilium (mTLS y L7 sobre el mismo datapath eBPF, sin sidecars, pero con menos madurez en autorización L7).
+
+#### 14. Promoción de artefactos entre entornos
+
+**En qué consiste la necesidad:** mover una **misma** versión ya validada por una cadena de entornos (dev → staging → prod) con verificaciones entre etapas, sin reconstruir el artefacto y sin que nadie cambie a mano un `values.yaml` a las 2 de la mañana.
+
+**Por qué conviene cubrirla en el clúster:** Argo CD responde a "¿está el entorno como dice Git?", no a "¿puede pasar esta versión a producción?". La promoción es un flujo con puertas (tests, análisis, aprobación) y necesita estado propio: qué versión está en cada etapa y por qué se promovió.
+
+**Qué implica no cubrirla:** la promoción se haría con PRs manuales de bump de versión, con el riesgo de promover *tags* distintos entre entornos (la pesadilla de la trazabilidad) y sin registro de por qué se autorizó cada paso.
+
+**Dónde es crítica o casi indispensable:** organizaciones con varios entornos y obligaciones de auditoría sobre los cambios, y plataformas que sirven a muchos equipos con releases frecuentes.
+
+**Por qué no lo cubre el stack actual:** hay un solo entorno. Argo CD aplica lo que hay en Git; no existe el concepto de etapa, promoción ni *gate*.
+
+**Herramienta principal:** **Kargo** (open source de Akuity, el equipo que creó Argo CD; **no** es un proyecto CNCF) — modela `Warehouse` (fuente de artefactos), `Stage` (entorno) y `Freight` (versión verificada), y ejecuta secuencias de promoción con pasos y verificaciones, escribiendo el resultado de vuelta en Git. [Sitio](https://kargo.akuity.io) · [GitHub](https://github.com/akuity/kargo) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=kargo).
+
+*Consumo orientativo:* ~250-500 mCPU y ~256-512 MiB (API + controlador); no necesita base de datos externa: usa CRDs y Secrets.
+
+**Alternativas:** [Flux](https://fluxcd.io) (CNCF, *Graduated*) con [Flagger](https://flagger.app) para *progressive delivery* por entornos, y la vía "manual estructurada": ramas por entorno + overlays de Kustomize + `ApplicationSet` con `targetRevision` por *stage*.
+
+#### 15. Gestión de varios clústeres
+
+**En qué consiste la necesidad:** desplegar y mantener las mismas cargas en **varios clústeres** (regiones, nubes, sedes, *edge*) desde un punto de control, con colocación por políticas, *failover* y estado agregado.
+
+**Por qué conviene cubrirla en el clúster:** con un solo clúster, Argo CD basta. A partir del segundo, cada clúster duplica el trabajo operativo (credenciales, versiones, deriva) y la pregunta "¿qué versión está corriendo en cada sitio?" deja de tener una respuesta única.
+
+**Qué implica no cubrirla:** N veces la operación, deriva entre clústeres (el "funciona en Madrid pero no en Bogotá") y *failover* manual. Los equipos acaban con scripts que recorren `kubectl config use-context`.
+
+**Dónde es crítica o casi indispensable:** multi-región por latencia o residencia de datos, sedes con conectividad intermitente (*edge*), y organizaciones que ya operan más de tres clústeres.
+
+**Por qué no lo cubre el stack actual:** hay un único clúster; el bootstrap ni siquiera contempla un registro de clústeres.
+
+**Herramienta principal:** **Karmada** (proyecto CNCF) — plano de control multi-clúster compatible con la API de Kubernetes: `PropagationPolicy` para decidir qué va a qué clúster, con `OverridePolicy` por sitio y estado agregado. [Sitio](https://karmada.io) · [GitHub](https://github.com/karmada-io/karmada) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=karmada).
+
+*Consumo orientativo:* ~1-2 GiB de RAM y ~500 mCPU-1 CPU para el plano de control (API server, controller-manager y scheduler).
+
+**Alternativas:** Argo CD con `ApplicationSet` y generador de clústeres (la vía más simple, sin plano de control adicional), [Cluster API](https://cluster-api.sigs.k8s.io) para el ciclo de vida y [Skupper](https://skupper.io) o [Liqo](https://liqo.io) cuando lo que se busca es conectar servicios entre clústeres en lugar de orquestarlos.
+
+#### 16. Ingeniería del caos
+
+**En qué consiste la necesidad:** **inyectar fallos de forma controlada y continua** (matar pods, añadir latencia, particionar la red, llenar un disco, corromper respuestas DNS) para comprobar que la plataforma y las aplicaciones se recuperan como dicen sus SLOs.
+
+**Por qué conviene cubrirla en el clúster:** las pruebas de resiliencia hechas a mano se ejecutan una vez y nunca más. El caos automatizado convierte la validación en parte del ciclo: los experimentos se declaran como CRDs y se ejecutan con criterios de éxito.
+
+**Qué implica no cubrirla:** los fallos se descubren en producción, y las políticas de red, los PDB, los *timeouts* y las *probes* nunca se validan de verdad. La recuperación depende de la suerte y del conocimiento tácito de una persona.
+
+**Dónde es crítica o casi indispensable:** organizaciones con SLOs formales y guardias, plataformas con cargas con estado, y equipos que quieren hacer *game days* sin construir su propio inyector de fallos.
+
+**Por qué no lo cubre el stack actual:** existe un script puntual ([`tests/gateway-chaos-test.sh`](tests/gateway-chaos-test.sh)) que valida la migración de la IP flotante, pero no hay experimentos continuos ni catálogo de fallos.
+
+**Herramienta principal:** **Chaos Mesh** (proyecto CNCF) — operador con CRDs para `PodChaos`, `NetworkChaos`, `StressChaos`, `IOChaos`, `DNSChaos` y `TimeChaos`, con *workflows* y planificación. [Sitio](https://chaos-mesh.org) · [GitHub](https://github.com/chaos-mesh/chaos-mesh) · [ArtifactHub](https://artifacthub.io/packages/helm/chaos-mesh/chaos-mesh).
+
+*Consumo orientativo:* ~100-200 mCPU y ~128-256 MiB para el controlador, más ~50 mCPU y ~64 MiB **por nodo** del `chaos-daemon` (necesita privilegios para manipular la red y el sistema de ficheros del nodo).
+
+**Alternativas:** [LitmusChaos](https://litmuschaos.io) (CNCF, con *ChaosHub* de experimentos reutilizables) y [ChaosBlade](https://github.com/chaosblade-io/chaosblade).
+
+#### 17. Visibilidad de coste y *right-sizing*
+
+**En qué consiste la necesidad:** saber **cuánto cuesta** cada namespace, equipo o etiqueta, y si los `requests`/`limits` están bien dimensionados respecto al consumo real.
+
+**Por qué conviene cubrirla en el clúster:** el HPA escala por CPU pero nadie garantiza que el `request` base sea correcto. Sin atribución de coste no hay conversación posible entre plataforma y producto sobre recursos, y el sobredimensionamiento se convierte en una constante invisible.
+
+**Qué implica no cubrirla:** costes inexplicables (o capacidad desperdiciada), imposibilidad de *chargeback* por equipo y decisiones de capacidad a ojo. En cloud se factura cada mes; en homelab se traduce en hardware comprado de más.
+
+**Dónde es crítica o casi indispensable:** cualquier organización con factura cloud relevante, equipos de plataforma que cobran internamente, y clústeres con muchos namespaces de distintos dueños.
+
+**Por qué no lo cubre el stack actual:** metrics-server da consumo puntual de pods y nodos, pero no histórico, ni atribución, ni recomendaciones; y en este Homelab no hay factura cloud que repartir.
+
+**Herramienta principal:** **OpenCost** (proyecto CNCF) — calcula el coste por pod/namespace/etiqueta a partir de precios de nodos y consumo, y expone las métricas para consultarlas o graficarlas. [Sitio](https://opencost.io) · [GitHub](https://github.com/opencost/opencost) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=opencost).
+
+*Consumo orientativo:* ~100-300 mCPU y ~256 MiB-1 GiB; **requiere Prometheus** (o compatible) con las métricas de nodos y pods, así que hereda el coste del stack de observabilidad.
+
+**Alternativas:** Kubecost (producto comercial sobre OpenCost), [Goldilocks](https://goldilocks.docs.fairwinds.com) junto a [VPA](https://github.com/kubernetes-sigs/vertical-pod-autoscaler) (solo recomendaciones de *requests*, sin coste) y la propia facturación del proveedor cloud con etiquetas de *cost allocation*.
+
+#### 18. Procesamiento batch, colas y cuotas de trabajo
+
+**En qué consiste la necesidad:** ejecutar trabajos que no son servicios permanentes (ETL, entrenamiento, renderizado, migraciones) **encolados**, con cuotas por equipo y reparto justo de la capacidad cuando hay más demanda que nodos.
+
+**Por qué conviene cubrirla en el clúster:** el scheduler de Kubernetes atiende pods, no "trabajos con prioridad y cuota". Sin una capa de colas, dos equipos lanzan 200 Jobs a la vez y el clúster entra en un ciclo de desalojo y *starvation* donde nadie termina.
+
+**Qué implica no cubrirla:** Jobs que esperan indefinidamente, Pods `Pending` que bloquean a los servicios, y ausencia de *fair sharing* entre equipos. Tampoco hay forma de decir "este trabajo usa GPUs solo cuando no hay inferencia".
+
+**Dónde es crítica o casi indispensable:** plataformas de datos y de ML, organizaciones con clústeres compartidos entre batch y online, y cualquier entorno con GPUs o hardware caro y escaso.
+
+**Por qué no lo cubre el stack actual:** existen `Job` y `CronJob` nativos (de hecho el Homelab usa uno para sincronizar el certificado de Vault), pero no hay colas, ni cuotas por cola, ni *preemption* entre equipos.
+
+**Herramienta principal:** **Kueue** (proyecto de `kubernetes-sigs`, parte del ecosistema Kubernetes) — CRDs de `ClusterQueue`, `LocalQueue` y `Workload` que gestionan *admission* y *preemption* de Jobs, integrable con Cluster Autoscaler/Karpenter. [Sitio](https://kueue.sigs.k8s.io) · [GitHub](https://github.com/kubernetes-sigs/kueue) · [ArtifactHub](https://artifacthub.io/packages/search?ts_query_web=kueue).
+
+*Consumo orientativo:* ~100-200 mCPU y ~256 MiB para el controlador; el coste real es la capacidad que consumen los Jobs.
+
+**Alternativas:** [Argo Workflows](https://argoproj.github.io/workflows) (CNCF, *Graduated*; DAGs de tareas y plantillas, muy usado para pipelines de datos) y [Volcano](https://volcano.sh) (CNCF, planificación de batch/HPC con *gang scheduling*).
+
+#### 19. Portal de autoservicio para los equipos
+
+**En qué consiste la necesidad:** un **catálogo** donde un equipo pide "un servicio nuevo con base de datos", obtiene el andamiaje (repositorio, pipeline, manifests, alertas) y ve el estado de lo suyo, sin abrir un ticket.
+
+**Por qué conviene cubrirla en el clúster:** el bootstrap técnico resuelve *dónde* se despliega, no *cómo se pide*. Sin portal, cada alta se resuelve por chat/ticket y el conocimiento vive en la cabeza de dos personas; el portal convierte esa plantilla en software versionado y medible.
+
+**Qué implica no cubrirla:** *onboarding* lento, configuraciones inconsistentes entre equipos y una carga alta de soporte en el equipo de plataforma. Los equipos copian el repositorio de otro y arrastran su deuda.
+
+**Dónde es crítica o casi indispensable:** organizaciones con muchas células o equipos (decenas), plataformas internas con SLA hacia producto, y empresas que necesitan demostrar *golden paths* y cumplimiento en el alta de servicios.
+
+**Por qué no lo cubre el stack actual:** no aplica a un homelab de una persona; hoy la "plantilla" son los ejemplos de este README y la convención de [`k8s/apps/`](k8s/apps) es más que suficiente.
+
+**Herramienta principal:** **Backstage** (proyecto CNCF) — portal de desarrollador con catálogo de software, *software templates* (scaffolding con formularios) y plugins para CI/CD, Kubernetes y documentación. [Sitio](https://backstage.io) · [GitHub](https://github.com/backstage/backstage).
+
+*Consumo orientativo:* ~300-800 mCPU y ~512 MiB-1 GiB (es una aplicación Node con frontend y backend) más una base de datos; se puede desplegar como app normal en el clúster.
+
+**Alternativas:** Port (SaaS comercial), [KubeVela](https://kubevela.io) (CNCF; modelo de aplicaciones OAM con *traits* por entorno) y un *golden path* mínimo con repositorio plantilla + `ApplicationSet`.
+
+#### 20. Conformidad del clúster
+
+**En qué consiste la necesidad:** verificar de forma reproducible que el clúster **cumple la especificación de Kubernetes** (tests de conformidad) y que las versiones instaladas siguen soportadas.
+
+**Por qué conviene cubrirla en el clúster:** es la garantía de portabilidad: si mañana se cambia de CNI, de cloud o se migra el clúster, los manifiestos y operadores seguirán funcionando. En distribuciones y plataformas internas es, directamente, parte del producto.
+
+**Qué implica no cubrirla:** se descubriría en la migración que el clúster dependía de un comportamiento no estándar. Tampoco hay evidencia objetiva para un cliente o un auditor de que el clúster es "Kubernetes conforme".
+
+**Dónde es crítica o casi indispensable:** quien construye una distribución o plataforma sobre Kubernetes (incluido un homelab que quiera demostrar buenas prácticas), organizaciones multi-nube y procesos de *upgrade* con validación previa.
+
+**Por qué no lo cubre el stack actual:** [`scripts/validate-cluster.sh`](scripts/validate-cluster.sh) valida **este** stack (que los componentes estén sanos), no la conformidad con la especificación de Kubernetes.
+
+**Herramienta principal:** **Sonobuoy** (proyecto CNCF) — ejecuta la batería de tests de conformidad de Kubernetes (y plugins propios) en Jobs temporales y genera un informe exportable. [Sitio](https://sonobuoy.io) · [GitHub](https://github.com/vmware-tanzu/sonobuoy).
+
+*Consumo orientativo:* **0 en reposo**: no hay componente residente; el coste son los Jobs que ejecutan las pruebas mientras dura la validación.
+
+**Alternativas:** los tests e2e de Kubernetes (`kubernetes/test/conformance`) orquestados a mano, [kube-bench](https://github.com/aquasecurity/kube-bench) para el CIS (complementario, no es conformidad) y la validación de la distribución (Talos publica sus propias notas de conformidad).
+
+#### Propósitos deliberadamente fuera de esta lista
+
+| Propósito | Por qué no está aquí |
+|-----------|----------------------|
+| Observabilidad (métricas, logs, trazas, alertas) | Está en la hoja de ruta de este Homelab: VictoriaMetrics + OpenObserve sobre el nodo de operaciones |
+| Autenticación de usuarios y SSO (OIDC/SAML) | Planificado con Keycloak como despliegue posterior |
+| Almacenamiento de objetos compatible con S3 | Planificado con SeaweedFS |
+| Mensajería y *streaming* (Kafka, Pulsar) | Mencionado como necesidad futura; no forma parte del estado "ready to work" mínimo |
+| Gestión de secretos en Git sin Vault externo | Ya cubierto por Vault + ESO/VSO; Sealed Secrets o SOPS serían alternativas si no existiera Vault |
+
+### Cómo decidir qué instalar (y qué no)
+
+Cada componente de esta lista añade **superficie de ataque, consumo y una cosa más que operar**. La regla que aplico en este Homelab es la misma que usaría en una empresa: instalar primero lo que evita un daño **irreversible** y solo después lo que mejora la eficiencia.
+
+| Prioridad | Propósito | Por qué en ese orden |
+|-----------|-----------|----------------------|
+| 1 | Copias de seguridad (2) | Es lo único que no se puede recuperar de otra forma |
+| 2 | Guardrails de admisión (1) | Evita que el daño entre por diseño |
+| 3 | Detección en runtime (3) y escaneo (4) | Convierten un incidente silencioso en una alerta |
+| 4 | Almacenamiento resiliente (8) y mTLS (13) | Cuando hay cargas con estado o requisitos de *zero trust* |
+| 5 | Autoscaling (6), DNS automático (11), multi-tenancy (10) | Eficiencia y escala de la operación |
+| 6 | El resto (5, 7, 9, 12, 14-20) | Dependen del modelo de negocio y del tamaño de la organización |
+
+Y la contraparte: si el clúster es de una sola persona, con un puñado de servicios y sin datos que no se puedan regenerar, **la lista correcta es casi vacía**. Este Homelab es exactamente ese caso.
+
+---
+
+
 
 ## Prueba de Tráfico hacia nuestro Clúster
 
@@ -3507,13 +6266,13 @@ chmod +x tests/validate-cert-with-curl.sh
 ./tests/validate-cert-with-curl.sh
 ```
 
-Al ejecutar este Script, es posible que obtengamos un error de `curl` que diga `SSL certificate problem: unable to get local issuer certificate`; este error no necesariamente significa que el clúster de Kubernetes o CIlium tenga un error, al contrario, confirman que la criptografía está funcionando exactamente como debe. Veamos por qué pasa este error dependiendo el caso.
+Al ejecutar este Script, es posible que obtengamos un error de `curl` que diga `SSL certificate problem: unable to get local issuer certificate`; este error no necesariamente significa que el clúster de Kubernetes o Cilium tenga un error, al contrario, confirman que la criptografía está funcionando exactamente como debe. Veamos por qué pasa este error dependiendo el caso.
 
-##### Caso 1: El dominio local (`api.eljavatar.home`)
+##### Caso 1: El dominio local (`playground.eljavatar.home`)
 
 - **A qué se debe el error de curl:**
 
-  `curl` es una herramienta de transferencia de datos diseñada para ser segura por defecto. Cuando intentamos conectarnos a `https://api.eljavatar.home`, Cilium le entrega a nuestra máquina local un certificado emitido por nuestra Autoridad Certificadora interna (`issuer=CN=cluster-internal-ca`).
+  `curl` es una herramienta de transferencia de datos diseñada para ser segura por defecto. Cuando intentamos conectarnos a `https://playground.eljavatar.home`, Cilium le entrega a nuestra máquina local un certificado emitido por nuestra Autoridad Certificadora interna (`issuer=CN=cluster-internal-ca`).
 
   Inmediatamente, `curl` busca en el llavero de nuestro sistema operativo (`/etc/ssl/cert.pem` en mi caso) para ver si la entidad `cluster-internal-ca` está en la lista de autoridades en las que nuestro computador confía globalmente. Como es una CA que nosotros mismos inventamos y creamos dentro del clúster, nuestra máquina local no la conoce, desconfía de ella y aborta la conexión por seguridad.
 
@@ -3530,12 +6289,12 @@ Al ejecutar este Script, es posible que obtengamos un error de `curl` que diga `
   kubectl get configmap cluster-trusted-ca -n gateway-api-system -o jsonpath='{.data.internal-ca-bundle\.crt}' > certs/my-internal-ca.crt
 
   # Le pasamos la CA a curl para que confíe en ella
-  curl -vI --cacert certs/my-internal-ca.crt --resolve "api.eljavatar.home:443:$IP_CILIUM_GATEWAY" "https://api.eljavatar.home"
+  curl -vI --cacert certs/my-internal-ca.crt --resolve "playground.eljavatar.home:443:$IP_CILIUM_GATEWAY" "https://playground.eljavatar.home"
   ```
 
   Al ejecutarlo con `--cacert`, `curl` verá que el certificado del Gateway fue firmado por el archivo `certs/my-internal-ca.crt` que le proporcionamos, la validación criptográfica será exitosa y completará la conexión de forma segura.
 
-##### Caso 2: El dominio público (`api.eljavatar.org`)
+##### Caso 2: El dominio público (`playground.eljavatar.org`)
 
 Si al ejecutar el comando con el dominio `.org` obtenemos el mismo error, significa que el recurso `Certificate` público todavía está apuntando al emisor de Staging (`letsencrypt-stage-issuer`).
 
@@ -3545,21 +6304,21 @@ Si al ejecutar el comando con el dominio `.org` obtenemos el mismo error, signif
 
 - **¿Cómo solucionarlo?**
 
-  Debemos modificar el `archivo k8s/cert-letsencrypt-public.yaml` para que use el emisor de producción de Let's Encrypt que en nuestro caso es `letsencrypt-prod-issuer`, y volver a aplicar el manifiesto del certificado:
+  Debemos modificar el `archivo k8s/bootstrap/config/cert-letsencrypt-public.yaml` para que use el emisor de producción de Let's Encrypt que en nuestro caso es `letsencrypt-prod-issuer`, y volver a aplicar el manifiesto del certificado:
 
   ```yaml
-  # En el archivo k8s/cert-letsencrypt-public.yaml
+  # En el archivo k8s/bootstrap/config/cert-letsencrypt-public.yaml
     issuerRef:
       name: letsencrypt-prod-issuer # <-- Cambiamos stage por prod
       kind: ClusterIssuer
   ```
 
-  En cuanto ejecutemos `kubectl apply -f k8s/cert-letsencrypt-public.yaml` y `cert-manager` termine de validar el desafío con Cloudflare (entre unos 30 segundos y 2 minutos), Let's Encrypt emitirá un certificado firmado por su entidad oficial confiable (`CN=YE2` en este caso). A partir de ese milisegundo, el curl hacia `https://api.eljavatar.org` funcionará perfectamente sin errores, porque la CA de Let's Encrypt ya viene preinstalada de fábrica en nuestro sistema operativo.
+  En cuanto ejecutemos `kubectl apply -f k8s/bootstrap/config/cert-letsencrypt-public.yaml` y `cert-manager` termine de validar el desafío con Cloudflare (entre unos 30 segundos y 2 minutos), Let's Encrypt emitirá un certificado firmado por su entidad oficial confiable (`CN=YE2` en este caso). A partir de ese milisegundo, el curl hacia `https://playground.eljavatar.org` funcionará perfectamente sin errores, porque la CA de Let's Encrypt ya viene preinstalada de fábrica en nuestro sistema operativo.
 
   De esa forma si volvemos a lanzar el curl, debería mostrarnos información del certificado, con un mensaje `SSL certificate verify ok`:
 
   ```sh
-  curl -vI --resolve "api.eljavatar.org:443:$IP_CILIUM_GATEWAY" "https://api.eljavatar.org"
+  curl -vI --resolve "playground.eljavatar.org:443:$IP_CILIUM_GATEWAY" "https://playground.eljavatar.org"
   ```
 
 
@@ -3632,7 +6391,7 @@ A pesar de este comportamiento que puede parecer erróneo, es la prueba irrefuta
 Simulamos tráfico de usuarios reales haciendo consultas infinitas al dominio local:
 
 ```sh
-while true; do curl -skI --connect-timeout 1 --resolve "api.eljavatar.home:443:192.168.0.70" "https://api.eljavatar.home" | grep HTTP; sleep 0.2; done
+while true; do curl -skI --connect-timeout 1 --resolve "playground.eljavatar.home:443:192.168.0.70" "https://playground.eljavatar.home" | grep HTTP; sleep 0.2; done
 ```
 
 #### Paso B: Provocar el Fallo (Inyección de Caos)
@@ -3645,7 +6404,7 @@ Tenemos dos formas de simular la caída del nodo líder que anotamos en el Paso 
 kubectl drain <nombre-del-nodo-lider> --ignore-daemonsets --delete-emptydir-data
 ```
 
-**Método Duro (A nivel físico - El más realista):** Vamos a la interfaz de Proxmox y reiniciamos abrubtamente (también la podríamos apagar) la VM de Talos que tiene el liderazgo. Las peticiones HTTP/HTTPS continuarán devolviendo el estado `HTTP/2 200` (o como en este caso no tenemos un servicio en la ruta `api.eljavatar.home`, será un `404`) de nuestras aplicaciones web o gRPC sin interrupción visible, validando que Envoy tomó el control del tráfico en el host secundario.
+**Método Duro (A nivel físico - El más realista):** Vamos a la interfaz de Proxmox y reiniciamos abrubtamente (también la podríamos apagar) la VM de Talos que tiene el liderazgo. Las peticiones HTTP/HTTPS continuarán devolviendo el estado `HTTP/2 200` (o como en este caso no tenemos un servicio en la ruta `playground.eljavatar.home`, será un `404`) de nuestras aplicaciones web o gRPC sin interrupción visible, validando que Envoy tomó el control del tráfico en el host secundario.
 
 #### Paso C: Analizar los Resultados del Experimento
 
@@ -3655,7 +6414,7 @@ Al observar las terminales de monitoreo inmediatamente después del corte, deber
 
 2. **En la Terminal 2 (Ping)**, notaremos que la conexión puede perder como máximo 1 o 2 pings (menos de un segundo de interrupción) mientras la tabla ARP del switch de nuestra casa se actualiza con la nueva dirección MAC. Sin embargo, lo importante es verificar que el mensaje de `Destination Host Unreachable` ahora responderá desde la IP del nuevo nodo de Kubernetes que asumió el liderazgo.
 
-3. **En la Terminal 3 (Curl)**, comprobaremos que las peticiones HTTP/HTTPS se recuperan de inmediato y siguen respondiendo `HTTP/2 200` o el código correspondiente (probablemente sea `HTTP/2 404` ya que `api.eljavatar.home` es una ruta que no está asociada a ningún servicio), demostrando que Envoy en la otra VM ya está procesando el tráfico.
+3. **En la Terminal 3 (Curl)**, comprobaremos que las peticiones HTTP/HTTPS se recuperan de inmediato y siguen respondiendo `HTTP/2 200` o el código correspondiente (probablemente sea `HTTP/2 404` ya que `playground.eljavatar.home` es una ruta que no está asociada a ningún servicio), demostrando que Envoy en la otra VM ya está procesando el tráfico.
 
 #### Paso D: Ejecución mediante un Script
 
@@ -3681,28 +6440,28 @@ Aquí tenemos un ejemplo de implementación para nginx que se ejecuta como un us
 kubectl apply -f tests/playground-nginx.yaml
 
 # Hacemos un curl (Lo hacemos con el resolve para evitar añadir esta ruta a nuestro archivo /etc/hosts)
-curl --insecure --resolve "api.eljavatar.home:443:$IP_CILIUM" "https://api.eljavatar.home"
+curl --insecure --resolve "playground.eljavatar.home:443:$IP_CILIUM" "https://playground.eljavatar.home"
 
-curl --insecure --resolve "api.eljavatar.org:443:$IP_CILIUM" "https://api.eljavatar.org"
+curl --insecure --resolve "playground.eljavatar.org:443:$IP_CILIUM" "https://playground.eljavatar.org"
 
 
 # Al finalizar la prueba, podríamos simplemente eliminar el namespace:
 kubectl delete ns playground
 ```
 
-En ambos casos, deberíamos ver en la terminal el HTML de la página de inicio de la aplicación nginx que se despliega con el manifiesto `tests/playground-nginx.yaml`, lo cual demuestra que nuestro clúster de Kubernetes, Cilium, Let's Encrypt, el Gateway y dicha aplicación de nginx junto con su HTTPRoute están configurados a la perfección. Sin embargo, si intentamos acceder desde el navegador, no nos cargaría nada ya que no hay una red física externa (un DNS) que le diga al navegador cómo resolver las URLs `api.eljavatar.home` y `api.eljavatar.org`.
+En ambos casos, deberíamos ver en la terminal el HTML de la página de inicio de la aplicación nginx que se despliega con el manifiesto `tests/playground-nginx.yaml`, lo cual demuestra que nuestro clúster de Kubernetes, Cilium, Let's Encrypt, el Gateway y dicha aplicación de nginx junto con su HTTPRoute están configurados a la perfección. Sin embargo, si intentamos acceder desde el navegador, no nos cargaría nada ya que no hay una red física externa (un DNS) que le diga al navegador cómo resolver las URLs `playground.eljavatar.home` y `playground.eljavatar.org`.
 
 **¿Por qué funciona en la terminal?**
 
-En este caso al usar el comando `curl`, le estamos aplicando un truco técnico con el parámetro `--resolve`. Ese flag le dice a `curl`: "*Ignora el internet real, no busques en ningún servidor DNS del mundo, asume manualmente que `api.eljavatar.org` (o `api.eljavatar.home`) está en la IP privada de mi casa `192.168.0.70`*".
+En este caso al usar el comando `curl`, le estamos aplicando un truco técnico con el parámetro `--resolve`. Ese flag le dice a `curl`: "*Ignora el internet real, no busques en ningún servidor DNS del mundo, asume manualmente que `playground.eljavatar.org` (o `playground.eljavatar.home`) está en la IP privada de mi casa `192.168.0.70`*".
 
-En cambio nuestro navegador web no tiene ese parámetro `--resolve`. Cuando escribimos `https://api.eljavatar.org` (o `https://api.eljavatar.home`) en la barra de direcciones del computador o el celular, el navegador realiza un flujo estándar de internet para resolución de DNS que actualmente está fallando en nuestra infraestructura por falta de dos configuraciones externas.
+En cambio nuestro navegador web no tiene ese parámetro `--resolve`. Cuando escribimos `https://playground.eljavatar.org` (o `https://playground.eljavatar.home`) en la barra de direcciones del computador o el celular, el navegador realiza un flujo estándar de internet para resolución de DNS que actualmente está fallando en nuestra infraestructura por falta de dos configuraciones externas.
 
 A continuación veremos qué necesitamos configurar para que funcione en el navegador según desde dónde intentemos acceder:
 
 #### Escenario A: Acceder desde DENTRO de nuestra red mediante un DNS Local
 
-A pesar de que estemos conectados al mismo Wi-Fi o red que nuestras mini PCs que corren los servidores de Proxmox que contienen las VMs de Talos que componen nuestro clúster de Kubernetes, nuestro navegador no sabe que `api.eljavatar.home` debe apuntar a dicho clúster. Por tanto, intentará buscar la IP en los servidores DNS públicos (como los de Google `8.8.8.8` o los de Cloudflare `1.1.1.1`) y no encontrará nada, debido a que `.home` no es un dominio de nivel superior (TLD) público y válido en el sistema de nombres de dominio de internet (la ICANN bloqueó el uso de este sufijo para registros abiertos en internet debido a posibles confusiones de seguridad).
+A pesar de que estemos conectados al mismo Wi-Fi o red que nuestras mini PCs que corren los servidores de Proxmox que contienen las VMs de Talos que componen nuestro clúster de Kubernetes, nuestro navegador no sabe que `playground.eljavatar.home` debe apuntar a dicho clúster. Por tanto, intentará buscar la IP en los servidores DNS públicos (como los de Google `8.8.8.8` o los de Cloudflare `1.1.1.1`) y no encontrará nada, debido a que `.home` no es un dominio de nivel superior (TLD) público y válido en el sistema de nombres de dominio de internet (la ICANN bloqueó el uso de este sufijo para registros abiertos en internet debido a posibles confusiones de seguridad).
 
 Para solucionar esto, lo ideal sería tener un servidor DNS local (como Pi-hole, AdGuard Home, o incluso el mismo panel de administración de nuestro router) en el cual podamos crear una regla DNS.
 
@@ -3715,10 +6474,10 @@ Por tanto, como alternativa podemos modificar el archivo `hosts`, el cual imitar
 sudo nano /etc/hosts
 
 # Añadimos esta línea al final y guardamos:
-192.168.0.70  api.eljavatar.home
+192.168.0.70  playground.eljavatar.home
 ```
 
-Ahora, si accedemos desde el navegador a `api.eljavatar.home`, veremos inicialmente un mensaje de Conexión no segura (esto debido a que recordemos que este dominio usa el certificado interno que no es reconocido por los navegadores); para continuar, solamente debemos hacer clic en <u>Continuar al sitio (no seguro)</u> y veremos la página de bienvenida a Nginx.
+Ahora, si accedemos desde el navegador a `playground.eljavatar.home`, veremos inicialmente un mensaje de Conexión no segura (esto debido a que recordemos que este dominio usa el certificado interno que no es reconocido por los navegadores); para continuar, solamente debemos hacer clic en <u>Continuar al sitio (no seguro)</u> y veremos la página de bienvenida a Nginx.
 
 #### Escenario B: Acceder desde FUERA de nuestra red con Cloudflare Tunnel
 
@@ -3730,10 +6489,10 @@ Para acceder a un servicio/aplicación de nuestro clúster desde internet usando
 
 Los 2 primeros pasos son globales, es decir, los realizamos una sola vez. Sin embargo, aún nos falta el paso 3, configurar el enrutamiento en Cloudflare hacia el Gateway de nuestro clúster para decirle a dónde enviar el tráfico que llega desde internet para ese túnel que creamos (este tercer paso lo debemos realizar por cada ruta (subdominio) desde la cual queramos recibir tráfico de Internet hacia nuestros servicios/aplicaciones dentro del clúster).
 
-Para esto, volvemos a la interfaz web de Cloudflare (en **Zero Trust**, y luego en **Networks** -> **Tunnels & Mesh**), y realizamos los siguientes pasos:
+Para esto, volvemos a la interfaz web de Cloudflare (en **Zero Trust**, y luego en **Networking** -> **Tunnels**), y realizamos los siguientes pasos:
 
 1. Entramos a la edición del túnel haciendo clic sobre él (o en los 3 puntos de la derecha y luego en **Configure**).
-2. Vamos a la pestaña *Published application routes* (o *Public Hostname*).
+2. Vamos a la pestaña *Published application routes* (o *Public Hostname* o *Routes*, o algo similar).
 3. Aquí nos aparecerá la ruta de prueba que habíamos creado cuando configuramos el túnel (`prueba.eljavatar.org`); la eliminamos ya que vamos a crear la ruta desde cero (clic en los 3 puntos de la derecha -> Delete -> Delete hostname).
 4. Hacemos clic en **Add a published application route**.
 6. Ingresamos los siguientes datos:
@@ -3747,12 +6506,12 @@ Para esto, volvemos a la interfaz web de Cloudflare (en **Zero Trust**, y luego 
    - Desplegamos la sección **Origin request and connection settings**
    - Desplegamos la sección **TLS** y configuramos lo siguiente:
      - **TLS Verify:** Lo activamos para que quede en `On` (Esto es estrictamente obligatorio porque Cloudflare se conectará a nuestro clúster usando el dominio del túnel, e internamente nuestro Cilium Gateway le responderá con el certificado Wildcard. Activar esta opción le indica a Cloudflare que confíe en el handshake TLS interno del Gateway sin validar la cadena pública de la IP privada)
-     - **Match SNI to Host:** Lo activamos para que quede en `On` (una alternativa a esta config es escribir en el campo *Origin Server Name* la ruta completa de la aplicación, es decir, `api.eljavatar.org`)
+     - **Match SNI to Host:** Lo activamos para que quede en `On` (una alternativa a esta config es escribir en el campo *Origin Server Name* la ruta completa de la aplicación, es decir, `playground.eljavatar.org`)
    - Desplegamos la sección **HTTP Settings** y configuramos lo siguiente:
-     - **HTTP Host Header:** `api.eljavatar.org`
+     - **HTTP Host Header:** `playground.eljavatar.org`
 7. Finalmente damos clic en **Save**.
 
-Ahora, si accedemos desde el navegador a `api.eljavatar.org`, veremos la página de bienvenida a Nginx con un candado verde 100% confiable emitido por Cloudflare de cara al público.
+Ahora, si accedemos desde el navegador a `playground.eljavatar.org`, veremos la página de bienvenida a Nginx con un candado verde 100% confiable emitido por Cloudflare de cara al público.
 
 En caso de que al acceder veamos una página de error *Bad Gateway (código 502)* (la cual es una respuesta oficial generada por los servidores perimetrales de Cloudflare), significa que el túnel está perfectamente abierto y saludable desde nuestro clúster hacia internet, pero cuando Cloudflare intenta enviar el tráfico dentro del clúster hacia la IP de nuestro Gateway (`192.168.0.70:443`), la conexión es rechazada.
 
@@ -3776,11 +6535,13 @@ Las razones principales de este tipo de error podrían ser las siguientes (las c
   - Envoy revisa las reglas del listener `https-publico` del Gateway y encuentra la restricción estricta: `hostname: "*.eljavatar.org"`.
   - Al comparar `"192.168.0.70"` contra `"*.eljavatar.org"`, la coincidencia falla por completo. Como Envoy tiene prohibido servir certificados a hostnames no autorizados en ese listener, aplica la política de seguridad por defecto: corta la conexión de inmediato enviando un Connection Reset.
 
-  La solución es inyectar el parámetro **SNI** durante el saludo criptográfico de la conexión de `cloudflared` hacia nuestro clúster de Kubernetes, lo cual se puede lograr de 2 formas distinta: activando **Match SNI to Host** para que quede en `On` o escribiendo textualmente `api.eljavatar.org` en el campo `Origin Server Name`.
+  La solución es inyectar el parámetro **SNI** durante el saludo criptográfico de la conexión de `cloudflared` hacia nuestro clúster de Kubernetes, lo cual se puede lograr de 2 formas distinta: activando **Match SNI to Host** para que quede en `On` o escribiendo textualmente `playground.eljavatar.org` en el campo `Origin Server Name`.
 
-  Al aplicar cualquiera de estas dos opciones, cuando el pod de `cloudflared` intente abrir el socket seguro hacia la IP `192.168.0.70:443`, el saludo TLS incluirá la extensión SNI con el valor `api.eljavatar.org`.
+  Al aplicar cualquiera de estas dos opciones, cuando el pod de `cloudflared` intente abrir el socket seguro hacia la IP `192.168.0.70:443`, el saludo TLS incluirá la extensión SNI con el valor `playground.eljavatar.org`.
 
   El proxy Envoy de Cilium validará que este host encaja perfectamente dentro de la regla comodín `*.eljavatar.org` de nuestro listener `https-publico`, completará exitosamente el handshake TLS utilizando el Secret de Let's Encrypt y redirigirá el tráfico sin contratiempos hacia el `HTTPRoute` de la aplicación Nginx de prueba, devolviendo un código HTTP/2 200 en el navegador, y por ende, la respectiva página de bienvenida a Nginx.
+
+---
 
 
 
@@ -3920,6 +6681,8 @@ kubectl events --types=Warning -n playground --for vaultauths.secrets.hashicorp.
 # También podemos mirar los logs del operador de VSO para encontrar la causa del error:
 kubectl logs -n vault-secrets-operator deployments/vault-secrets-operator-controller-manager -f --tail=100
 ```
+
+---
 
 
 
@@ -4067,6 +6830,8 @@ Como casi todo en ingeniería de software, depende del caso y las necesidades:
 | Se quiere probar en el entorno real de producción pero **oculto tras un "pase VIP"** | **Estrategia 2** (Filtro por Headers en el HTTPRoute) |
 | Se quiere un flujo **100% automatizado (CI/CD)** sin intervención humana | **Estrategia 3** (AnalysisTemplates apuntando al servicio interno) |
 
+---
+
 
 
 ## Prueba de Despliegue Canary con Argo Rollouts
@@ -4169,4 +6934,82 @@ Así pues, procedemos con los siguientes pasos:
    kubectl delete ns canary-demo
    ```
 
+---
+
+
+
+
+
+# Convenciones de organización de manifiestos
+
+Esta sección es la **hoja de ruta** para cualquier despliegue posterior al bootstrap: existe para que añadir una aplicación no obligue a decidir de nuevo dónde va cada cosa.
+
+**La regla de oro**
+
+> **Bootstrap y aplicaciones no se mezclan:** `k8s/bootstrap/` es lo que aplica Terraform; `k8s/apps/` son cargas de trabajo que dependen de él. Si Terraform lo aplica, va en `bootstrap/`; si lo aplica Argo CD como aplicación, va en `apps/`.
+
+### Una carpeta por aplicación
+
+```text
+k8s/apps/
+└── keycloak/
+    ├── README.md            # Cómo se instala y qué necesita
+    ├── namespace.yaml       # SIEMPRE con su label de Pod Security explícito
+    ├── values.yaml          # Values del chart (el caso habitual)
+    ├── charts/              # Solo si hay chart propio
+    ├── manifests/           # Solo si hay YAML sueltos (como k8s/bootstrap/deployments/cloudflare-tunnel/)
+    └── kustomize/           # Solo si se adopta Kustomize
+```
+
+| Caso de la aplicación | Estructura | Cuándo |
+|-----------------------|------------|--------|
+| Chart de terceros + values | `apps/<app>/values.yaml` | El caso habitual |
+| Varios entornos | `apps/<app>/values/{local,prod}.yaml` | Cuando aparezca el segundo entorno |
+| Chart propio | `apps/<app>/charts/<app>/` + `apps/<app>/values.yaml` | Poco frecuente |
+| Manifiestos sueltos | `apps/<app>/manifests/` | Ocasional |
+| Kustomize | `apps/<app>/kustomize/{base,overlays/<env>}` | Solo si se adopta |
+| Helmfile | `apps/<app>/helmfile.yaml` (fichero, **no** carpeta) | Solo si se adopta |
+
+**No se crean carpetas vacías "por si acaso":** una app que solo necesita un `values.yaml` es solo un `values.yaml`. La estructura crece cuando la app la necesita, no antes.
+
+### Dos reglas obligatorias para cada aplicación
+
+1. **`namespace.yaml` con el nivel de Pod Security explícito.** Si la app la despliega Argo CD, el equivalente es `syncPolicy.managedNamespaceMetadata.labels`. Sin esa etiqueta el namespace cae al default (`baseline`) y si algún día se endurece `enforce` la aplicación deja de arrancar. Ver [Pod Security Admission](#pod-security-admission-niveles-matriz-por-componente-y-comprobaciones).
+2. **Un `README.md`** con el comando de instalación y sus dependencias ("requiere el `ClusterIssuer` interno", "requiere PVC de `openebs-hostpath`", requiere algo adicional?). Es lo que evita reconstruir el orden a base de `kubectl get` dentro de seis meses.
+
+### Cómo lo consume Argo CD
+
+Los values de una aplicación se referencian con `ref: values`, igual que los del bootstrap:
+
+```yaml
+sources:
+  - repoURL: https://charts.example.com
+    chart: keycloak
+    targetRevision: 24.0.0
+    helm:
+      valueFiles:
+        - $values/k8s/apps/keycloak/values.yaml
+  - repoURL: https://github.com/eljavatar/kubernetes-homelab
+    targetRevision: main
+    ref: values
+```
+
+Por eso `make gitops-publish` publica `gitops/` **y todo `k8s/`**: si un values vive en `k8s/apps/`, Argo CD no lo verá hasta que esté en la rama.
+
+### Dónde va cada cosa nueva
+
+| Lo que se va a crear | Dónde va |
+|----------------------|----------|
+| Un values de Helm para un componente del bootstrap | `k8s/bootstrap/deployments/<componente>-values.yaml` |
+| Un `Namespace`, `Certificate`, `ClusterIssuer` o RBAC del bootstrap | `k8s/bootstrap/config/` |
+| Un `.tpl` que renderiza Terraform | `k8s/bootstrap/templates/` |
+| Un manifiesto de referencia que no se aplica | `k8s/bootstrap/optional/` |
+| Una aplicación nueva | `k8s/apps/<app>/` (con su `namespace.yaml` y su `README.md`) |
+| Una `Application` con spec propia | `gitops/apps/<app>/application.yaml` |
+| Un componente homogéneo (chart + values) | `gitops/generated/<app>/config.yaml` |
+| Un script de apoyo | `scripts/` + target en el `Makefile` |
+| Un script o manifiesto de prueba | `tests/` |
+| Una política custom de Vault | `vault/policies` |
+
+---
 

@@ -25,17 +25,8 @@ if ! kubectl config get-contexts "$TARGET_CONTEXT" >/dev/null 2>&1; then
     exit 1
 fi
 
-# # Obtener el contexto actual automáticamente
-# CURRENT_CONTEXT=$(kubectl config current-context 2>/dev/null || true)
-
-# if [ -z "$CURRENT_CONTEXT" ]; then
-#     echo "❌ Error: No hay ningún contexto activo configurado."
-#     exit 1
-# fi
 
 echo -e "\nContexto a eliminar: ${TARGET_CONTEXT}"
-
-
 
 
 # Obtener el cluster y usuario asociados al contexto objetivo
@@ -61,14 +52,6 @@ fi
 
 
 
-
-# # Obtener el cluster y usuario asociados al contexto actual
-# CLUSTER=$(kubectl config view -o jsonpath="{.contexts[?(@.name=='${CURRENT_CONTEXT}')].context.cluster}")
-# USER=$(kubectl config view -o jsonpath="{.contexts[?(@.name=='${CURRENT_CONTEXT}')].context.user}")
-
-# echo "Cluster asociado: ${CLUSTER}"
-# echo "Usuario asociado: ${USER}"
-
 echo -e "\n=== 2. Eliminando componentes del contexto actual ==="
 
 # Si el contexto a borrar es el actual, lo desconfiguramos primero
@@ -76,11 +59,6 @@ CURRENT_ACTIVE=$(kubectl config current-context 2>/dev/null || true)
 if [ "$TARGET_CONTEXT" = "$CURRENT_ACTIVE" ]; then
     kubectl config unset current-context
 fi
-
-# # Desconfigurar el contexto actual
-# kubectl config unset current-context
-
-
 
 
 # Eliminar contexto, cluster y usuario
@@ -92,7 +70,6 @@ kubectl config delete-context "${TARGET_CONTEXT}"
 # kubectl config delete-context "${CURRENT_CONTEXT}"
 # kubectl config delete-cluster "${CLUSTER}"
 # kubectl config delete-user "${USER}"
-
 
 
 # Asegurar la limpieza del contexto actual por si acaso

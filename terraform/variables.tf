@@ -27,12 +27,14 @@ variable "cloudflare_api_token" {
   type        = string
   description = "API Token con permisos Zone.DNS:Edit para el desafío DNS-01"
   sensitive   = true
+  ephemeral   = true # Evita que la variable se guarde en otros lugares del estado
 }
 
 variable "cloudflare_tunnel_token" {
   type        = string
   description = "Token del túnel de Cloudflare"
   sensitive   = true
+  ephemeral   = true # Evita que la variable se guarde en otros lugares del estado
 }
 
 variable "use_local_iso" {
@@ -43,7 +45,7 @@ variable "use_local_iso" {
 
 variable "is_development" {
   type        = bool
-  default     = true
+  default     = false
   description = "Si es true, el clúster arranca en modo permisivo (Desarrollo). Si es false, activa el perfil estricto 'baseline' por defecto (Producción)."
 }
 
@@ -51,6 +53,18 @@ variable "auto_config_cluster" {
   type        = bool
   default     = true
   description = "Define si se auto-configura el clúster después de hacer el bootstrap o no"
+}
+
+variable "sync_with_tf" {
+  type        = bool
+  default     = false
+  description = "Define si un componente se debe gestionar con Terraform o no; en caso de que no, debería ser instalado manualmente, ó gestionado con GitOps"
+}
+
+variable "gitops_branch" {
+  type        = string
+  default     = "main"
+  description = "Rama del repositorio GitOps que sincroniza la Application raíz (main en producción, test/<tema> en pruebas)"
 }
 
 variable "use_prod_domain" {

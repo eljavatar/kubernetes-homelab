@@ -15,7 +15,8 @@ spec:
     size: 256
   dnsNames:
     - "eljavatar.org" # Recomendado añadir el dominio raíz para cobertura total
-    - "*.eljavatar.org" # Cubre auth.eljavatar.org, api.eljavatar.org, etc.
+    - "*.eljavatar.org" # Cubre auth.eljavatar.org, grafana.eljavatar.org, etc.
+    - "*.neobank.eljavatar.org" # Cubre auth.neobank.eljavatar.org, wallet.neobank.eljavatar.org, etc.
   issuerRef:
     name: letsencrypt-stage-issuer # Apunta al ClusterIssuer de Cloudflare
     kind: ClusterIssuer

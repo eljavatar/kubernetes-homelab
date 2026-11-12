@@ -1,0 +1,41 @@
+# Esta es una Application de ejemplo, la cual no hay riesgo de ser sincronizada por
+# el root (App-of-Apps) ya que el nombre del archivo no es 'application.yaml'
+#
+# Patrón de múltiples "sources":
+#   1. El chart, servido por su repositorio Helm.
+#   2. Nuestro repositorio Git, referenciado con 'ref: values', del que se leen
+#      los valueFiles (los mismos que usa Terraform en k8s/bootstrap/deployments/).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: descheduler
+  namespace: argocd
+  annotations:
+    # Se instala después de los operadores base del clúster
+    argocd.argoproj.io/sync-wave: "30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: homelab-platform
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/descheduler/
+      chart: descheduler
+      targetRevision: 0.36.0
+      helm:
+        releaseName: descheduler
+        valueFiles:
+          - $values/k8s/bootstrap/deployments/descheduler-values.yaml
+    - repoURL: https://github.com/eljavatar/kubernetes-homelab
+      targetRevision: main
+      ref: values
+  destination:
+    # API server del propio clúster donde corre Argo CD
+    server: https://kubernetes.default.svc
+    # Namespace real del release (no el nombre de la carpeta)
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

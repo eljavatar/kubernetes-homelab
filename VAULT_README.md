@@ -86,6 +86,8 @@ En ese orden de ideas, algo importante a tener en cuenta es asignar la cantidad 
 - **Motores de secretos pesados:** El uso del motor *Transit* (cifrado como servicio) consume mucha CPU.
 - **Logs de auditoría:** Si se activa el guardado de logs en archivos dentro del mismo disco, los 15 GB se llenarán rápidamente si hay mucho tráfico.
 
+---
+
 
 
 
@@ -197,7 +199,7 @@ Adicionalmente, habilitaremos el acceso mediante llaves SSH (por ejemplo para en
 ```sh
 ssh-keygen -t ed25519 -C "correo@email.com" -f ~/.ssh/id_proxmox_lxc_vault
 # Contraseña: Al pedir una passphrase, presionar Enter dos veces para dejarla en blanco ya que queremos que
-# Terraform automatice las conexiones sin pedir claves interactivamente.
+# el componente/script que use la llave automatice las conexiones sin pedir claves interactivamente.
 
 # Podemos verificar la lista de llaves que tenemos ejecutando:
 ls -l ~/.ssh/id_*.pub
@@ -231,6 +233,9 @@ ssh-copy-id -i ~/.ssh/id_proxmox_lxc_vault.pub root@192.168.0.20
 
 ```sh
 ssh -i /Users/andres/.ssh/id_proxmox_lxc_vault 'root@192.168.0.20'
+# También podemos hacerlo sin pasarle la llave sin el flag `-i`, 
+# ya que la configuramos previamente en el archivo '~/.ssh/config'
+ssh 'root@192.168.0.20'
 ```
 
 Adicionalmente, como ya se tiene habilitado el acceso mediante llave SSH, si se desea se puede volver a desactivar el acceso mediante contraseña, para lo cual tendríamos que volver a editar el archivo `/etc/ssh/sshd_config` dentro del contenedor LXC en Proxmox y cambiar la línea que modificamos antes para que quede con el valor `PermitRootLogin prohibit-password`.
@@ -623,6 +628,8 @@ Abrimos el navegador en nuestra máquina local (en mi caso, mi Macbook Pro), ing
    vault status
    ```
 
+---
+
 
 
 
@@ -786,6 +793,8 @@ Raft Applied Index      5046
 En esta salida podemos ver que `Sealed` ya aparece con valor `false`, ya que después de encender el LXC, el LXC inició Vault y Systemd lo desbloqueó de inmediato.
 
 Además, si hemos seguido todos los pasos hasta aquí, al ejecutar `printenv` también veremos que tenemos configuradas las variables de entorno `VAULT_ADDR` y `VAULT_SKIP_VERIFY`, con lo cual ya tenemos listo el ambiente de nuestro LXC para poder usar la CLI de `vault` sin preocuparnos por el unseal de la bóveda o por tener que agregar variables de entorno.
+
+---
 
 
 
@@ -2306,16 +2315,16 @@ kubectl create secret generic vault-ca-bootstrap \
 
 # Crear la `ServiceAccount` con los permisos que necista el operador de cert-manager
 # para crear el token temporal con el que se autenticará ante Vault
-kubectl apply -f k8s/optional/vault-cert-manager-sa-rbac.yaml
+kubectl apply -f k8s/bootstrap/optional/vault-cert-manager-sa-rbac.yaml
 
 # Crear el recurso Issuer (el emisor) con los datos para autenticarse ante la entidad
 # emisora de certificados, que en este caso es nuestro servidor de Vault
-kubectl apply -f k8s/optional/vault-server-ca-issuer.yaml
+kubectl apply -f k8s/bootstrap/optional/vault-server-ca-issuer.yaml
 
 # Crear recurso Certificate que es el que obtiene el certificado desde la entidad
 # emisora y lo guarda en un Secret dentro del namespace que se le indique. En el
 # manifiesto pusimos de ejemplo 'playground' pero puede ser cualquier otro.
-kubectl apply -f k8s/optional/vault-server-ca-cert.yaml
+kubectl apply -f k8s/bootstrap/optional/vault-server-ca-cert.yaml
 
 # Para validar que todo está bien, se hace después de solicitar un certificado
 # Como mencionamos, lo hicimos de ejemplo en el namespace playground
@@ -2326,7 +2335,7 @@ kubectl get certificaterequests -n playground -o wide
 kubectl describe certificaterequest -n playground vault-server-cert-<ID_ALEATORIO>
 ```
 
-
+---
 
 
 
