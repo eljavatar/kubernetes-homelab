@@ -12,7 +12,7 @@
 ![Vault](https://img.shields.io/badge/Vault-2.0.4-f8c517?logo=vault&logoColor=white)
 ![License](https://img.shields.io/github/license/eljavatar/kubernetes-homelab?logo=apache&logoColor=white)
 
-Montar un clúster de Kubernetes "de verdad" no es instalar un CNI y esperar. Este repositorio documenta, paso a paso y sin atajos ocultos, cómo levantar 7 máquinas virtuales en Proxmox con Talos Linux, dejarlas en un estado **ready to work** (red, borde, confianza TLS, secretos, almacenamiento y entrega continua incluidos) y cómo **verificar automáticamente** que todo eso sigue funcionando después de cada recreación del clúster.
+Montar un clúster de Kubernetes "de verdad" no es instalar un CNI y esperar. Este repositorio documenta, paso a paso y sin atajos ocultos, cómo levantar 7 máquinas virtuales en Proxmox con Talos Linux, dejarlas en un estado **ready to work** (red, borde, confianza TLS, secretos, almacenamiento y entrega continua incluidos) y cómo **verificar automáticamente** que todo eso sigue funcionando después de una eventual recreación del clúster.
 
 El flujo completo se resume en un comando:
 
@@ -20,7 +20,7 @@ El flujo completo se resume en un comando:
 make tf-apply && make validate-cluster
 ```
 
-> **Portabilidad:** aunque el laboratorio corre sobre Proxmox, la arquitectura no depende de él. Para llevarlo a AWS, Azure, GCP o servidores propios se cambia `terraform/main.tf` (el aprovisionamiento); el resto de las capas —Talos, Cilium, cert-manager, Vault, Argo CD y la validación— se mantienen prácticamente igual.
+> **Portabilidad:** aunque el laboratorio corre sobre Proxmox, la arquitectura no depende de él. Para llevarlo a AWS, Azure, GCP o servidores propios se cambiaría `terraform/main.tf` (el aprovisionamiento); el resto de las capas —Talos, Cilium, cert-manager, Vault, Argo CD y la validación— se mantendrían prácticamente igual.
 >
 > **Licencia:** [Apache 2.0](LICENSE), la misma que Kubernetes, Talos, Cilium, Argo CD y Vault. Las CRDs de Gateway API vendorizadas en [`k8s/bootstrap/gateway-api-crds/`](k8s/bootstrap/gateway-api-crds) son de `kubernetes-sigs` y también Apache 2.0, así que son compatibles y solo requieren conservar sus cabeceras.
 
@@ -32,7 +32,7 @@ make tf-apply && make validate-cluster
 - **GitOps con reconciliación:** App-of-Apps + ApplicationSet, ramas de prueba que no ensucian `main` y health checks propios → [Modelo de responsabilidades](#modelo-de-responsabilidades-bootstrap-con-terraform-vs-gitops-con-argo-cd)
 - **Seguridad desde el bootstrap:** Pod Security Admission con excepciones explícitas, CA interna distribuida por trust-manager, secretos fuera de Git y mTLS en el borde → [Pod Security Admission](#pod-security-admission-niveles-matriz-por-componente-y-comprobaciones)
 - **Operación verificable:** decenas de comprobaciones en una sola pasada, cada fallo con el ancla hacia el README donde está su troubleshooting → [Validación automática del clúster](#validación-automática-del-clúster-make-validate-cluster)
-- **Decisiones con criterio, no con recetas:** tablas comparativas, fronteras de responsabilidad y "el por qué no de X cosa" documentados, incluido qué componentes *no* hacen falta → [Otros Componentes Según el Caso de Uso](#otros-componentes-según-el-caso-de-uso)
+- **Decisiones con criterio, no con recetas:** tablas comparativas, fronteras de responsabilidad y "el por qué no de X cosa" documentados, incluido qué componentes *no* hacen falta en este Homelab → [Otros Componentes Según el Caso de Uso](#otros-componentes-según-el-caso-de-uso)
 
 
 
@@ -40,14 +40,14 @@ make tf-apply && make validate-cluster
 
 ```mermaid
 flowchart TD
-    P[Proxmox VE · 2 Mini PCs] --> T[Talos Linux · 3 control planes + 4 workers]
-    T --> C[Cilium · CNI eBPF · LB · Gateway API]
+    P[Proxmox VE · 2 Mini PCs] --> T[Talos Linux · Kubernetes · 3 control planes + 4 workers]
+    T --> C[Cilium · CNI eBPF · LB · Gateway API · Cloudflare Tunnel · CSI OpenEBS]
     C --> TLS[cert-manager · CA interna · Let's Encrypt]
-    TLS --> S[Vault + ESO/VSO · secretos fuera de Git]
+    TLS --> S[Vault Auth + ESO/VSO · secretos fuera de Git]
     V[Vault · LXC fuera del clúster] -.-> S
     S --> G[Argo CD · App-of-Apps + ApplicationSet]
     G --> W[Componentes utilitarios y aplicaciones]
-    W --> O[Hubble · flujos y métricas de red]
+    W --> O[Validaciones · Hubble · flujos y métricas de red]
 ```
 
 
@@ -68,9 +68,10 @@ flowchart TD
 
 1. [Arquitectura Física y Conectividad](#arquitectura-física-y-conectividad) — el hardware y la red que hay detrás.
 2. [Estructura de carpetas del proyecto](#estructura-de-carpetas-del-proyecto) — dónde vive cada cosa y quién la ejecuta.
-3. [Modelo de responsabilidades](#modelo-de-responsabilidades-bootstrap-con-terraform-vs-gitops-con-argo-cd) — la frontera entre Terraform y Argo CD.
-4. [Validación automática del clúster](#validación-automática-del-clúster-make-validate-cluster) — cómo se comprueba que todo funciona.
-5. [Otros Componentes Según el Caso de Uso](#otros-componentes-según-el-caso-de-uso) — qué no cubre este clúster y qué herramienta lo resolvería.
+3. [Planificación de la Topología para el Clúster de Kubernetes](#planificación-de-la-topología-para-el-clúster-de-kubernetes) - cómo se van a distribuir las cargas de trabajo dentro del clúster.
+4. [Modelo de responsabilidades](#modelo-de-responsabilidades-bootstrap-con-terraform-vs-gitops-con-argo-cd) — la frontera entre Terraform y Argo CD.
+5. [Validación automática del clúster](#validación-automática-del-clúster-make-validate-cluster) — cómo se comprueba que todo funciona.
+6. [Otros Componentes Según el Caso de Uso](#otros-componentes-según-el-caso-de-uso) — qué no cubre este clúster y qué herramienta lo resolvería.
 
 
 
@@ -103,7 +104,7 @@ flowchart TD
   - [Optimización del Almacenamiento Interno](#optimización-del-almacenamiento-interno)
 - [Instalación de HashiCorp Vault en Proxmox](#instalación-de-hashicorp-vault-en-proxmox)
 - [Preparación para la Automatización (Terraform + Talos)](#preparación-para-la-automatización-terraform--talos)
-  - [Planificación de la Topología para el Clúster de Kubernetes (Talos Linux)](#planificación-de-la-topología-para-el-clúster-de-kubernetes-talos-linux)
+  - [Planificación de la Topología para el Clúster de Kubernetes](#planificación-de-la-topología-para-el-clúster-de-kubernetes)
   - [Configurar Acceso para Acceder a Proxmox desde Terraform](#configurar-acceso-para-acceder-a-proxmox-desde-terraform)
   - [Configurar Imagen inmutable de Talos Linux](#configurar-imagen-inmutable-de-talos-linux)
   - [Creación del API Token de Cloudflare para la validación de nuestro dominio](#creación-del-api-token-de-cloudflare-para-la-validación-de-nuestro-dominio)
@@ -629,7 +630,7 @@ Para ver cómo Instalar y Configurar HashiCorp Vault en nuestro HomeLab (el cual
 
 # Preparación para la Automatización (Terraform + Talos)
 
-## Planificación de la Topología para el Clúster de Kubernetes (Talos Linux)
+## Planificación de la Topología para el Clúster de Kubernetes
 
 Ahora que los Nodos de Proxmox están listos y preparados para correr VMs, definimos la arquitectura del clúster de Kubernetes para que soporte con holgura los servicios requeridos.
 
@@ -3307,11 +3308,13 @@ En desarrollo se mantiene `enforce: privileged` (para no frenar las pruebas) per
 
 # Instalación de Componentes utilitarios
 
+_**NOTA DE DESARROLLADOR:** Al igual que con las configuraciones y componentes de la sección [Configuración del Clúster](#configuración-del-clúster), cuando se ejecuta el comando `terraform apply` (ó `make tf-apply`) por defecto se hace con la variable `auto_config_cluster=true`, lo que significa que los procesos y configuraciones que detallo en esta sección se realizarán de forma automática, pero aún así lo dejo documentado ya que fue el proceso manual que yo mismo seguí antes de pasar a automatizar todo con Terraform_
+
 En este repositorio, un **componente utilitario** es todo lo que se instala **después** del bootstrap para que el clúster sea usable por un equipo: operadores que resuelven un problema transversal (secretos, certificados, políticas), herramientas de entrega continua y utilidades de administración. No forman parte de la base mínima (el clúster arranca sin ellos), pero sin ellos no estaría en el estado "ready to work".
 
 El orden de las subsecciones sigue las **capas de dependencia**, no el alfabeto: primero los operadores base (secretos externos y entrega continua), después las utilidades que dependen de ellos (Reloader, Descheduler, Metrics Server, OpenFeature), luego las piezas de plataforma (cAdvisor) y al final las herramientas de administración.
 
-> **¿Quién instala cada cosa?** Depende del modo elegido. Con `sync_with_tf = true` los instala Terraform; con `sync_with_tf = false` (el recomendado) los instala Argo CD desde [`gitops/`](gitops). La frontera completa y el por qué, están en [Modelo de responsabilidades](#modelo-de-responsabilidades-bootstrap-con-terraform-vs-gitops-con-argo-cd), y el estado de cada uno se comprueba con [`scripts/validate-cluster.sh`](scripts/validate-cluster.sh).
+> **¿Quién instala cada cosa?** Depende del modo elegido. Con `sync_with_tf = true` los instala Terraform; con `sync_with_tf = false` (el recomendado) los instala Argo CD desde [`gitops/`](gitops). La frontera completa y el por qué, se detallan en la sección del [Modelo de responsabilidades](#modelo-de-responsabilidades-bootstrap-con-terraform-vs-gitops-con-argo-cd), y el estado de cada uno se puede combrobar también automáticamente con [`scripts/validate-cluster.sh`](scripts/validate-cluster.sh).
 
 
 
@@ -4391,7 +4394,7 @@ kubectl apply -f gitops/projects/homelab-platform.yaml
 > |-----|---------------|--------|
 > | `make tf-apply` | Vía normal, Terraform es el dueño | Reaplica el YAML y mantiene el estado |
 > | `kubectl apply -f gitops/projects/homelab-platform.yaml` | Cambio urgente sin pasar por Terraform | Aplica, pero el siguiente `terraform apply` lo reconcilia |
-> | Delegar en Argo CD | **Evolución:** `gitops/apps/projects/application.yaml` + eliminar el `kubectl_manifest` de Terraform (`terraform -chdir=terraform state rm kubectl_manifest.argocd_project_homelab_platform` -> borrado del bloque de código -> `make tf-apply`) | Un solo dueño; se actualiza con commit + sync |
+> | Delegar en Argo CD | **Evolución:** `gitops/apps/projects/application.yaml` + eliminar el `kubectl_manifest` de Terraform (`terraform -chdir=terraform state rm kubectl_manifest.argocd_project_homelab_platform` (para que Terraform "olvide" ese manifiesto) -> borrado del bloque de código -> `make tf-apply`) | Un solo dueño; se actualiza con commit + sync |
 
 
 ### Paso 6: Bootstrap: App-of-Apps
